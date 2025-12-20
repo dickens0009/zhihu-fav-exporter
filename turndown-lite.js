@@ -5,6 +5,20 @@ function htmlToMarkdown(rootEl) {
   clone.querySelectorAll("script, style, noscript").forEach((n) => n.remove());
 
   const escapeMd = (s) => String(s).replace(/[\\`*_{}[\]()#+\-.!]/g, "\\$&");
+  const escapeHtmlAttr = (s) => String(s ?? "").replace(/"/g, "&quot;");
+  const toAbsUrl = (u) => {
+    const src = String(u || "").trim();
+    if (!src) return "";
+    if (src.startsWith("data:")) return "";
+    if (src.startsWith("http://") || src.startsWith("https://")) return src;
+    if (src.startsWith("//")) return `${location.protocol}${src}`;
+    try {
+      return new URL(src, location.href).href;
+    } catch {
+      return src;
+    }
+  };
+  const imgHtml = (src) => `<img src="${escapeHtmlAttr(src)}" width="800">`;
 
   function walk(node) {
     if (node.nodeType === Node.TEXT_NODE) {
@@ -27,6 +41,29 @@ function htmlToMarkdown(rootEl) {
       if (!txt) return "";
       if (node.parentElement?.tagName?.toLowerCase() === "pre") return ""; // pre 已处理
       return `\`${txt}\``;
+    }
+
+    // figure/figcaption：保证“图在上，标题在下”（知乎很常见）
+    if (tag === "figure") {
+      const imgs = Array.from(node.querySelectorAll(":scope img"))
+        .map((img) => walk(img).trim())
+        .filter(Boolean);
+
+      const capNode = node.querySelector(":scope figcaption");
+      const capText = capNode
+        ? Array.from(capNode.childNodes).map(walk).join("").trim()
+        : "";
+
+      const parts = [];
+      if (imgs.length) parts.push(imgs.join("\n\n"));
+      if (capText) parts.push(capText);
+      return parts.length ? `\n\n${parts.join("\n\n")}\n\n` : "";
+    }
+
+    if (tag === "figcaption") {
+      // 单独出现时也当作块级文本，确保换行
+      const capText = Array.from(node.childNodes).map(walk).join("").trim();
+      return capText ? `\n\n${capText}\n\n` : "";
     }
 
     const children = Array.from(node.childNodes).map(walk).join("");
@@ -58,8 +95,10 @@ function htmlToMarkdown(rootEl) {
         node.getAttribute("data-actualsrc") ||
         node.getAttribute("src") ||
         "";
-      if (!src || src.startsWith("data:")) return "";
-      return `![](${src})`;
+      const abs = toAbsUrl(src);
+      if (!abs) return "";
+      // 这里直接输出 HTML，满足“width=800”的要求；Markdown 渲染器一般会保留 HTML 标签
+      return imgHtml(abs);
     }
 
     if (tag === "ul") {

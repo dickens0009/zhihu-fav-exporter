@@ -9,6 +9,32 @@ function setStatus(msg) {
   $("status").textContent = msg;
 }
 
+function formatProgress(p) {
+  const title = p?.scopeTitle ? `${p.scopeTitle}\n` : "";
+  const done = Number(p?.processed ?? 0);
+  const total = Number(p?.total ?? 0);
+  const ok = Number(p?.ok ?? 0);
+  const failed = Number(p?.failed ?? 0);
+  const pct = total ? Math.floor((done / total) * 100) : 0;
+  const last = p?.lastFileBaseName ? `\n最近：${p.lastFileBaseName}` : "";
+  return `${title}进度：${done}/${total}（${pct}%）\n成功：${ok}  失败：${failed}${last}`;
+}
+
+// 后台推送的实时进度（popup 打开时会收到）
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type !== "UI_PROGRESS") return;
+  const p = msg.payload || {};
+  if (p.stage === "start") {
+    setStatus("开始导出…\n" + formatProgress(p));
+    return;
+  }
+  if (p.stage === "done") {
+    setStatus("完成 ✅\n" + formatProgress(p));
+    return;
+  }
+  setStatus(formatProgress(p));
+});
+
 async function getContext(tabId) {
   return await chrome.tabs.sendMessage(tabId, { type: "GET_CONTEXT" }).catch(() => null);
 }
