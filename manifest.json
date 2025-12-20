@@ -4,7 +4,7 @@
     "version": "0.2.0",
     "description": "Export Zhihu collections to Markdown. Images kept as links only.",
     "action": { "default_popup": "popup.html" },
-    "permissions": ["tabs", "downloads", "storage"],
+    "permissions": ["tabs", "downloads", "storage","notifications"],
     "host_permissions": ["https://www.zhihu.com/*", "https://zhuanlan.zhihu.com/*"],
     "background": { "service_worker": "background.js", "type": "module" },
     "content_scripts": [
