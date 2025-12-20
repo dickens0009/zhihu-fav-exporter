@@ -1,0 +1,23 @@
+{
+    "manifest_version": 3,
+    "name": "Zhihu Collections → Markdown Exporter",
+    "version": "0.2.0",
+    "description": "Export Zhihu collections to Markdown. Images kept as links only.",
+    "action": { "default_popup": "popup.html" },
+    "permissions": ["tabs", "downloads", "storage"],
+    "host_permissions": ["https://www.zhihu.com/*", "https://zhuanlan.zhihu.com/*"],
+    "background": { "service_worker": "background.js", "type": "module" },
+    "content_scripts": [
+      {
+        "matches": ["https://www.zhihu.com/*"],
+        "js": ["content_context.js"],
+        "run_at": "document_idle"
+      },
+      {
+        "matches": ["https://www.zhihu.com/*", "https://zhuanlan.zhihu.com/*"],
+        "js": ["turndown-lite.js", "content_extract.js"],
+        "run_at": "document_idle"
+      }
+    ]
+  }
+  
