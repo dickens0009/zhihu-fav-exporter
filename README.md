@@ -1,6 +1,6 @@
 # 知乎收藏夹导出 Markdown（Chrome 扩展）
 
-这是一个 **Chrome 扩展（Manifest V3）**，用于将知乎收藏夹中的内容批量导出为 **Markdown 文件**，便于本地归档、Obsidian/Typora 阅读、二次整理。
+这是一个 **Chrome 扩展（Manifest V3）**，用于将知乎收藏夹中的内容批量导出为 **Markdown 文件**，便于本地归档、Obsidian/Typora 阅读、二次整理。推荐采用Obsidian。
 
 ## 功能特点
 
