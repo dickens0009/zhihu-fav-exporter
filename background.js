@@ -236,15 +236,55 @@ async function openHiddenTab(url) {
   return tab;
 }
 
-function waitTabComplete(tabId) {
-  return new Promise((resolve) => {
-    const listener = (id, info) => {
-      if (id === tabId && info.status === "complete") {
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }
+async function safeRemoveTab(tabId) {
+  if (!tabId) return;
+  try {
+    await chrome.tabs.remove(tabId);
+  } catch (_) {
+    // tab 可能已被提前关闭/崩溃/被浏览器回收，忽略即可
+  }
+}
+
+function waitTabComplete(tabId, { timeoutMs = 45000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    let timer = null;
+
+    const cleanup = () => {
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+      if (timer) clearTimeout(timer);
+      timer = null;
     };
-    chrome.tabs.onUpdated.addListener(listener);
+
+    const finishOk = () => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve();
+    };
+
+    const finishErr = (err) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      reject(err);
+    };
+
+    const onUpdated = (id, info) => {
+      if (id === tabId && info.status === "complete") finishOk();
+    };
+
+    const onRemoved = (id) => {
+      if (id === tabId) finishErr(new Error(`tab closed before complete: ${tabId}`));
+    };
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onRemoved.addListener(onRemoved);
+
+    timer = setTimeout(() => {
+      finishErr(new Error(`wait tab complete timeout (${timeoutMs}ms): ${tabId}`));
+    }, timeoutMs);
   });
 }
 
@@ -295,7 +335,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             await sleep(800);
         
             const extracted = await extractFromTab(tab.id);
-            await chrome.tabs.remove(tab.id);
+            await safeRemoveTab(tab.id);
         
             if (extracted?.ok && extracted.md && extracted.fileBaseName) {
               lastName = extracted.fileBaseName;
@@ -403,7 +443,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               await sleep(800);
 
               const extracted = await extractFromTab(tab.id);
-              await chrome.tabs.remove(tab.id);
+              await safeRemoveTab(tab.id);
 
               if (extracted?.ok && extracted.md && extracted.fileBaseName) {
                 const file = `${folder}/${safeFilename(extracted.fileBaseName)}.md`;
