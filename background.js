@@ -164,16 +164,43 @@ async function listMemberCollections(urlToken, limit = 200) {
   const out = [];
   let offset = 0;
   const pageSize = 20;
+  let nextUrl = null;
+  let emptyStreak = 0;
 
   while (out.length < limit) {
-    const api = `https://www.zhihu.com/api/v4/members/${encodeURIComponent(
-      urlToken
-    )}/collections?offset=${offset}&limit=${pageSize}`;
+    const api =
+      nextUrl ||
+      `https://www.zhihu.com/api/v4/members/${encodeURIComponent(
+        urlToken
+      )}/collections?offset=${offset}&limit=${pageSize}`;
+
     const data = await zhihuApiGet(api);
     const arr = data?.data || [];
     out.push(...arr);
-    if (arr.length < pageSize) break;
-    offset += pageSize;
+
+    const paging = data?.paging;
+    const isEnd = typeof paging?.is_end === "boolean" ? paging.is_end : null;
+    const next = typeof paging?.next === "string" ? paging.next : null;
+
+    // 有些情况下接口会短暂返回空 data，但 paging 仍提示未结束（或缺失），这里做有限次重试
+    if (arr.length === 0) {
+      emptyStreak++;
+    } else {
+      emptyStreak = 0;
+    }
+
+    if (emptyStreak >= 3) break;
+
+    // 优先用 paging 判断是否结束与 next URL
+    if (isEnd === true) break;
+    if (next) {
+      nextUrl = next;
+    } else {
+      // 兜底：paging 缺失时退回 offset 翻页
+      offset += pageSize;
+      nextUrl = null;
+    }
+
     await sleep(250);
   }
   return out.slice(0, limit);
@@ -183,14 +210,38 @@ async function listCollectionItems(collectionId, limit = 200) {
   const out = [];
   let offset = 0;
   const pageSize = 20;
+  let nextUrl = null;
+  let emptyStreak = 0;
 
   while (out.length < limit) {
-    const api = `https://www.zhihu.com/api/v4/collections/${collectionId}/items?offset=${offset}&limit=${pageSize}`;
+    const api =
+      nextUrl ||
+      `https://www.zhihu.com/api/v4/collections/${collectionId}/items?offset=${offset}&limit=${pageSize}`;
+
     const data = await zhihuApiGet(api);
     const arr = data?.data || [];
     out.push(...arr);
-    if (arr.length < pageSize) break;
-    offset += pageSize;
+
+    const paging = data?.paging;
+    const isEnd = typeof paging?.is_end === "boolean" ? paging.is_end : null;
+    const next = typeof paging?.next === "string" ? paging.next : null;
+
+    if (arr.length === 0) {
+      emptyStreak++;
+    } else {
+      emptyStreak = 0;
+    }
+
+    if (emptyStreak >= 3) break;
+
+    if (isEnd === true) break;
+    if (next) {
+      nextUrl = next;
+    } else {
+      offset += pageSize;
+      nextUrl = null;
+    }
+
     await sleep(250);
   }
   return out.slice(0, limit);
