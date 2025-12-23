@@ -7,6 +7,7 @@ function htmlToMarkdown(rootEl) {
   const escapeMd = (s) => String(s).replace(/[\\`*_{}[\]()#+\-.!]/g, "\\$&");
   const escapeHtmlAttr = (s) => String(s ?? "").replace(/"/g, "&quot;");
   const normalizeEol = (s) => String(s ?? "").replace(/\r\n?/g, "\n");
+  const escapeMathDollar = (s) => String(s ?? "").replace(/\$/g, "\\$");
   const longestRun = (s, ch) => {
     const str = String(s ?? "");
     let max = 0;
@@ -67,6 +68,66 @@ function htmlToMarkdown(rootEl) {
   };
   const imgHtml = (src) => `<img src="${escapeHtmlAttr(src)}" width="800">`;
 
+  const extractTexFromImg = (imgEl) => {
+    if (!imgEl) return "";
+    const alt = (imgEl.getAttribute?.("alt") || "").trim();
+    // 有些站点会把 TeX 放在 alt 里
+    if (alt && /\\[a-zA-Z]+/.test(alt)) return alt;
+
+    const src =
+      imgEl.getAttribute?.("data-original") ||
+      imgEl.getAttribute?.("data-actualsrc") ||
+      imgEl.getAttribute?.("src") ||
+      "";
+    if (!src) return "";
+    try {
+      const abs = toAbsUrl(src);
+      const u = new URL(abs, location.href);
+      // 兼容：/equation?tex=... 这类“公式图片”链接
+      const tex = u.searchParams.get("tex") || "";
+      return tex ? decodeURIComponent(tex) : "";
+    } catch {
+      return "";
+    }
+  };
+
+  const looksLikeOnlyMathInP = (mathEl) => {
+    const p = mathEl?.parentElement;
+    if (!p || p.tagName?.toLowerCase() !== "p") return false;
+
+    // 只要段落里除了空白文本/换行，剩下都是“公式类元素”，就视为块公式
+    const isMathNode = (n) => {
+      if (!n) return false;
+      if (n.nodeType === Node.ELEMENT_NODE) {
+        const el = n;
+        const tag = el.tagName?.toLowerCase();
+        if (tag === "br") return true;
+        if (el.hasAttribute?.("data-tex")) return true;
+        const cls = String(el.className || "");
+        if (/\bztext-math\b/.test(cls)) return true;
+        if (/\bkatex\b/.test(cls)) return true;
+        if (tag === "annotation" && /tex/i.test(el.getAttribute?.("encoding") || "")) return true;
+        if (tag === "img" && (/\bztext-math\b/.test(cls) || String(el.getAttribute?.("src") || "").includes("equation?tex="))) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    for (const n of Array.from(p.childNodes || [])) {
+      if (n.nodeType === Node.TEXT_NODE) {
+        if ((n.textContent || "").trim() === "") continue;
+        return false;
+      }
+      if (n.nodeType === Node.ELEMENT_NODE) {
+        if (isMathNode(n)) continue;
+        return false;
+      }
+    }
+
+    return true;
+  };
+
   function walk(node) {
     if (node.nodeType === Node.TEXT_NODE) {
       return node.textContent.replace(/\s+/g, " ");
@@ -74,6 +135,58 @@ function htmlToMarkdown(rootEl) {
     if (node.nodeType !== Node.ELEMENT_NODE) return "";
 
     const tag = node.tagName.toLowerCase();
+
+    // 数学公式（知乎常见：span.ztext-math[data-tex]；以及 KaTeX/MathJax 的 annotation）
+    {
+      const cls = String(node.className || "");
+      const dataTex = node.getAttribute?.("data-tex");
+      const isZhihuMath = dataTex && /\bztext-math\b/.test(cls);
+      const isMathContainer =
+        !!dataTex ||
+        /\bztext-math\b/.test(cls) ||
+        /\bkatex\b/.test(cls) ||
+        tag === "annotation" ||
+        tag === "img";
+      if (isMathContainer) {
+        let tex = "";
+        if (dataTex) {
+          tex = dataTex;
+        } else if (tag === "annotation" && /tex/i.test(node.getAttribute?.("encoding") || "")) {
+          tex = node.textContent || "";
+        } else if (/\bkatex\b/.test(cls)) {
+          const ann = node.querySelector?.('annotation[encoding*="tex" i]');
+          tex = ann?.textContent || "";
+        } else if (tag === "img") {
+          tex = extractTexFromImg(node);
+        } else if (/\bztext-math\b/.test(cls)) {
+          // 有些结构 ztext-math 自身没有 data-tex，但内部 annotation 有
+          const ann = node.querySelector?.('annotation[encoding*="tex" i]');
+          tex = ann?.textContent || "";
+        }
+
+        tex = normalizeEol(tex).trim();
+        if (tex) {
+          // 规范：行内用 $...$，行间用 $$...$$
+          // 尽量判断“块公式”：显式标记/独占段落
+          const displayAttr = (node.getAttribute?.("data-display") || "").toLowerCase();
+          const isBlock =
+            displayAttr === "block" ||
+            tag === "div" ||
+            looksLikeOnlyMathInP(node) ||
+            // 兜底：知乎的块公式很多会是 ztext-math 且周围没有文字
+            (isZhihuMath && (node.closest?.("p") ? looksLikeOnlyMathInP(node) : false));
+
+          if (isBlock) {
+            const body = `$$\n${escapeMathDollar(tex)}\n$$`;
+            // 在段落内由 <p> 负责补空行；否则这里补上，避免粘连上下文
+            return node.parentElement?.tagName?.toLowerCase() === "p" ? body : `\n\n${body}\n\n`;
+          }
+
+          const inline = escapeMathDollar(tex).replace(/\s*\n\s*/g, " ");
+          return `$${inline}$`;
+        }
+      }
+    }
 
     // 保留代码块
     if (tag === "pre") {
@@ -121,7 +234,13 @@ function htmlToMarkdown(rootEl) {
     if (tag === "br") return "\n";
     if (tag === "p") {
       const t = trimSpaces(childText);
-      return t.replace(/\n/g, "").trim() ? `${t}\n\n` : "";
+      const trimmed = t.trim();
+      if (!trimmed) return "";
+      // 若段落里包含块公式（$$...$$），不要把换行压扁
+      if (/^\$\$\s*[\s\S]*\s*\$\$$/.test(trimmed) || trimmed.includes("\n$$\n") || trimmed.startsWith("$$\n")) {
+        return `${trimmed}\n\n`;
+      }
+      return trimmed.replace(/\n/g, "").trim() ? `${trimmed.replace(/\n/g, "")}\n\n` : "";
     }
     if (tag === "h1") {
       const t = childText.trim();
