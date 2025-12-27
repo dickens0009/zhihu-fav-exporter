@@ -8,15 +8,30 @@
     <div class="wrap">
       <h1>知乎收藏导出</h1>
 
-      <label class="row">
-        <span>每篇间隔(ms)</span>
-        <input id="delay" type="number" min="0" step="100" value="1200" />
-      </label>
+      <div id="pageHint" class="hint"></div>
 
       <label class="row">
-        <span>每个列表最多条目</span>
+        <span id="limitLabel">每个列表最多条目</span>
         <input id="limit" type="number" min="1" step="1" value="200" />
       </label>
+
+      <div id="downloadAllRow" class="row" style="display:none;">
+        <span>导出范围</span>
+        <div class="range">
+          <label class="rangeOpt">
+            <input id="rangeLatest" type="radio" name="rangeMode" value="latest" checked />
+            指定条数
+          </label>
+          <label class="rangeOpt">
+            <input id="rangeAll" type="radio" name="rangeMode" value="all" />
+            全部
+          </label>
+        </div>
+      </div>
+
+      <div id="collectionInfo" class="box" style="display:none;">
+        <div class="kv"><span class="k">预计耗时</span><span class="v" id="estimate">-</span></div>
+      </div>
 
       <div class="btns">
         <button id="exportThisCollection">导出当前收藏夹</button>

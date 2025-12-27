@@ -6,3 +6,12 @@ h1 { font-size: 16px; margin: 0 0 10px; }
 .btns { display: flex; gap: 8px; margin-top: 10px; }
 button { flex: 1; padding: 8px; cursor: pointer; }
 .status { margin-top: 10px; font-size: 12px; color: #444; line-height: 1.4; white-space: pre-wrap; }
+.hint { font-size: 12px; color: #666; line-height: 1.4; margin-bottom: 8px; white-space: pre-wrap; }
+.box { border: 1px solid #eee; border-radius: 8px; padding: 10px; background: #fafafa; margin-top: 8px; }
+.kv { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; line-height: 1.5; }
+.kv .k { color: #666; }
+.kv .v { color: #111; font-variant-numeric: tabular-nums; }
+
+.range { display: flex; gap: 10px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+.rangeOpt { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: #222; user-select: none; }
+.rangeOpt input { width: auto; }

@@ -2,6 +2,9 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// 每篇导出之间的固定间隔（不再从 popup 传入/用户配置）
+const FIXED_DELAY_MS = 1000;
+
 // ===== Progress Notifications (MV3) =====
 const NOTIF_ID = "zhihu_export_progress";
 
@@ -158,6 +161,20 @@ async function zhihuApiGet(url) {
   const resp = await fetch(url, { credentials: "include" });
   if (!resp.ok) throw new Error(`API ${resp.status}: ${url}`);
   return await resp.json();
+}
+
+async function getCollectionTotal(collectionId) {
+  // 只取 1 条即可（通常 paging 里会带 totals/total）
+  const api = `https://www.zhihu.com/api/v4/collections/${collectionId}/items?offset=0&limit=1`;
+  const data = await zhihuApiGet(api);
+  const paging = data?.paging || {};
+  const total =
+    Number(paging?.totals) ||
+    Number(paging?.total) ||
+    Number(data?.totals) ||
+    Number(data?.total) ||
+    0;
+  return total;
 }
 
 async function listMemberCollections(urlToken, limit = 200) {
@@ -351,9 +368,22 @@ function buildFolderName(prefix) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
-      if (msg?.type === "EXPORT_ONE_COLLECTION") {
-        const { collectionId, delay = 1200, limit = 200 } = msg;
+      if (msg?.type === "GET_COLLECTION_TOTAL") {
+        const { collectionId } = msg || {};
+        if (!collectionId) {
+          sendResponse({ ok: false, error: "missing collectionId" });
+          return;
+        }
+        const total = await getCollectionTotal(collectionId);
+        sendResponse({ ok: true, total });
+        return;
+      }
 
+      if (msg?.type === "EXPORT_ONE_COLLECTION") {
+        const { collectionId, collectionTitle, limit = 200 } = msg;
+        const delay = FIXED_DELAY_MS;
+
+        const startTs = Date.now();
         const items = await listCollectionItems(collectionId, limit);
         const urls = items.map(itemToUrl).filter(Boolean);
         
@@ -362,7 +392,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         let okCount = 0;
         let failCount = 0;
         
-        const folder = buildFolderName(`zhihu_collection_${collectionId}`);
+        const title = String(collectionTitle || "").trim();
+        const folderBase = title ? `知乎收藏夹_${title}` : `知乎收藏夹_${collectionId}`;
+        const folder = buildFolderName(folderBase);
         const scopeTitle = `收藏夹 ${collectionId}`;
         // 用户希望“每下载 1 个文件就更新状态”，这里对通知也不再节流
         const shouldNotify = () => true;
@@ -429,6 +461,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         
           await sleep(delay);
         }
+
+        // 记录一次统计：剔除 delay 后的平均耗时（供 popup 预估使用）
+        try {
+          const endTs = Date.now();
+          const elapsedSec = (endTs - startTs) / 1000;
+          const delaySec = (Number(delay) || 0) / 1000 * urls.length;
+          const coreElapsedSec = Math.max(0, elapsedSec - delaySec);
+          const coreAvgSecPerItem = urls.length ? coreElapsedSec / urls.length : 3;
+          await chrome.storage.local.set({
+            zhihuExporterStats: {
+              coreAvgSecPerItem,
+              updatedAt: new Date().toISOString()
+            }
+          });
+        } catch (_) {}
         
         notifyDone(scopeTitle, processed, total, okCount, failCount);
         pushUiProgress({
@@ -439,13 +486,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           ok: okCount,
           failed: failCount
         });
-        sendResponse({ ok: true, filename: `zhihu_collection_${collectionId}/...`, count: okCount });
+        sendResponse({ ok: true, filename: `${folder}/...`, count: okCount });
         return;
       }
 
       if (msg?.type === "EXPORT_ALL_COLLECTIONS") {
-        const { urlToken, delay = 1200, limit = 200 } = msg;
+        const { urlToken, limit = 200 } = msg;
+        const delay = FIXED_DELAY_MS;
 
+        const startTs = Date.now();
         const collections = await listMemberCollections(urlToken, 200);
         let okCount = 0;
         let failCount = 0;
@@ -566,6 +615,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           ok: okCount,
           failed: failCount
         });
+
+        // 同样记录一次统计（剔除 delay）
+        try {
+          const endTs = Date.now();
+          const elapsedSec = (endTs - startTs) / 1000;
+          const delaySec = (Number(delay) || 0) / 1000 * processed;
+          const coreElapsedSec = Math.max(0, elapsedSec - delaySec);
+          const coreAvgSecPerItem = processed ? coreElapsedSec / processed : 3;
+          await chrome.storage.local.set({
+            zhihuExporterStats: {
+              coreAvgSecPerItem,
+              updatedAt: new Date().toISOString()
+            }
+          });
+        } catch (_) {}
 
         return;
       }
