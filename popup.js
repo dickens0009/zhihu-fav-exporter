@@ -142,11 +142,14 @@ async function exportThisCollection() {
     limit = total;
   }
 
-  setStatus(`开始导出收藏夹 ${ctx.collectionId} …`);
+  // 底部状态与顶部一致：优先显示收藏夹名称；没有名称才回退到 id
+  const shownTitle = collectionTitle || `#${ctx.collectionId}`;
+  setStatus(`开始导出收藏夹“${shownTitle}” …`);
   const resp = await chrome.runtime.sendMessage({
     type: "EXPORT_ONE_COLLECTION",
     collectionId: ctx.collectionId,
     collectionTitle,
+    originTabId: tab.id,
     limit
   });
 
@@ -171,6 +174,7 @@ async function exportAllCollections() {
   const resp = await chrome.runtime.sendMessage({
     type: "EXPORT_ALL_COLLECTIONS",
     urlToken: ctx.urlToken,
+    originTabId: tab.id,
     limit
   });
 

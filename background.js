@@ -67,6 +67,60 @@ function notifyDoneText({ title, message, clearAfterMs = 5000 }) {
   }
 }
 
+// 仅当用户“仍停留在发起导出的标签页”时才显示/更新通知；切走则清掉并停止更新。
+async function createActiveTabNotifyGuard(originTabId) {
+  // 未传 originTabId 时保持旧行为：始终允许通知
+  if (!originTabId) {
+    return { isEnabled: () => true, dispose: () => {} };
+  }
+
+  let enabled = true;
+
+  const setEnabled = (v) => {
+    enabled = !!v;
+    if (!enabled) {
+      try {
+        chrome.notifications.clear(NOTIF_ID);
+      } catch (_) {}
+    }
+  };
+
+  const refreshActiveInWindow = async (windowId) => {
+    if (windowId === chrome.windows.WINDOW_ID_NONE) return setEnabled(false);
+    const [t] = await chrome.tabs.query({ active: true, windowId });
+    setEnabled(t?.id === originTabId);
+  };
+
+  const onActivated = (activeInfo) => setEnabled(activeInfo.tabId === originTabId);
+  const onRemoved = (tabId) => {
+    if (tabId === originTabId) setEnabled(false);
+  };
+  const onFocusChanged = (windowId) => {
+    refreshActiveInWindow(windowId).catch(() => {});
+  };
+
+  chrome.tabs.onActivated.addListener(onActivated);
+  chrome.tabs.onRemoved.addListener(onRemoved);
+  chrome.windows.onFocusChanged.addListener(onFocusChanged);
+
+  // init：以当前焦点窗口的激活 tab 为准（避免上来就“误通知”）
+  try {
+    const [t] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    setEnabled(t?.id === originTabId);
+  } catch (_) {
+    setEnabled(false);
+  }
+
+  return {
+    isEnabled: () => enabled,
+    dispose: () => {
+      chrome.tabs.onActivated.removeListener(onActivated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+      chrome.windows.onFocusChanged.removeListener(onFocusChanged);
+    }
+  };
+}
+
 // 给 popup 实时推送进度（popup 打开时可见；popup 关闭时不会报错）
 function pushUiProgress(payload) {
   try {
@@ -380,164 +434,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       if (msg?.type === "EXPORT_ONE_COLLECTION") {
-        const { collectionId, collectionTitle, limit = 200 } = msg;
+        const { collectionId, collectionTitle, originTabId, limit = 200 } = msg;
         const delay = FIXED_DELAY_MS;
+        const notifyGuard = await createActiveTabNotifyGuard(originTabId);
 
-        const startTs = Date.now();
-        const items = await listCollectionItems(collectionId, limit);
-        const urls = items.map(itemToUrl).filter(Boolean);
-        
-        const total = urls.length;
-        let processed = 0;
-        let okCount = 0;
-        let failCount = 0;
-        
-        const title = String(collectionTitle || "").trim();
-        const folderBase = title ? `知乎收藏夹_${title}` : `知乎收藏夹_${collectionId}`;
-        const folder = buildFolderName(folderBase);
-        const scopeTitle = `收藏夹 ${collectionId}`;
-        // 用户希望“每下载 1 个文件就更新状态”，这里对通知也不再节流
-        const shouldNotify = () => true;
-        
-        notifyStart(scopeTitle, total);
-        pushUiProgress({
-          scopeTitle,
-          stage: "start",
-          processed: 0,
-          total,
-          ok: 0,
-          failed: 0
-        });
-        
-        for (let i = 0; i < urls.length; i++) {
-          const url = urls[i];
-          let file = "";
-          let lastName = "";
-          try {
-            const tab = await openHiddenTab(url);
-            await sleep(800);
-        
-            const extracted = await extractFromTab(tab.id);
-            await safeRemoveTab(tab.id);
-        
-            if (extracted?.ok && extracted.md && extracted.fileBaseName) {
-              lastName = extracted.fileBaseName;
-              file = `${folder}/${safeFilename(extracted.fileBaseName)}.md`;
-              await downloadMarkdownFile(file, extracted.md);
-              okCount++;
-            } else {
-              failCount++;
-            }
-          } catch (e) {
-            console.error(
-              "export one item failed:",
-              url,
-              "file:",
-              JSON.stringify(file),
-              "len:",
-              String(file || "").length,
-              e
-            );
-            failCount++;
-          }
-        
-          processed++;
-
-          if (shouldNotify(processed)) {
-            notifyProgress(scopeTitle, processed, total, okCount, failCount);
-          }
-
-          pushUiProgress({
-            scopeTitle,
-            stage: "progress",
-            processed,
-            total,
-            ok: okCount,
-            failed: failCount,
-            lastUrl: url,
-            lastFileBaseName: lastName,
-            lastFile: file
-          });
-        
-          await sleep(delay);
-        }
-
-        // 记录一次统计：剔除 delay 后的平均耗时（供 popup 预估使用）
         try {
-          const endTs = Date.now();
-          const elapsedSec = (endTs - startTs) / 1000;
-          const delaySec = (Number(delay) || 0) / 1000 * urls.length;
-          const coreElapsedSec = Math.max(0, elapsedSec - delaySec);
-          const coreAvgSecPerItem = urls.length ? coreElapsedSec / urls.length : 3;
-          await chrome.storage.local.set({
-            zhihuExporterStats: {
-              coreAvgSecPerItem,
-              updatedAt: new Date().toISOString()
-            }
-          });
-        } catch (_) {}
-        
-        notifyDone(scopeTitle, processed, total, okCount, failCount);
-        pushUiProgress({
-          scopeTitle,
-          stage: "done",
-          processed,
-          total,
-          ok: okCount,
-          failed: failCount
-        });
-        sendResponse({ ok: true, filename: `${folder}/...`, count: okCount });
-        return;
-      }
-
-      if (msg?.type === "EXPORT_ALL_COLLECTIONS") {
-        const { urlToken, limit = 200 } = msg;
-        const delay = FIXED_DELAY_MS;
-
-        const startTs = Date.now();
-        const collections = await listMemberCollections(urlToken, 200);
-        let okCount = 0;
-        let failCount = 0;
-        let processed = 0;
-        let total = 0;
-
-        const scopeTitle = `用户 ${urlToken} 全部收藏夹`;
-        const shouldNotify = makeProgressThrottler({ everyN: 10, minIntervalMs: 3000 });
-
-        notifyStart(scopeTitle, 0); // total 先未知，后面动态更新
-        pushUiProgress({
-          scopeTitle,
-          stage: "start",
-          processed: 0,
-          total: 0,
-          ok: 0,
-          failed: 0
-        });
-
-        for (const col of collections) {
-          const cid = col.id;
-          const title = col.title || String(cid);
-          const folder = buildFolderName(`zhihu_${urlToken}/${title}_${cid}`);
-
-          const items = await listCollectionItems(cid, limit);
+          const startTs = Date.now();
+          const items = await listCollectionItems(collectionId, limit);
           const urls = items.map(itemToUrl).filter(Boolean);
-          total += urls.length;
 
-          
-          // 每次发现新增总量，顺便更新一下通知（不频繁）
-          notifyProgress(scopeTitle, processed, total, okCount, failCount);
+          const total = urls.length;
+          let processed = 0;
+          let okCount = 0;
+          let failCount = 0;
+
+          const title = String(collectionTitle || "").trim();
+          const folderBase = title ? `知乎收藏夹_${title}` : `知乎收藏夹_${collectionId}`;
+          const folder = buildFolderName(folderBase);
+          // UI/通知里显示收藏夹名称，和 popup 顶部保持一致；无名称再回退到 id
+          const scopeTitle = title ? `收藏夹“${title}”` : `收藏夹 #${collectionId}`;
+          // Windows 通知过于频繁会打扰用户：这里对“进度通知”做节流（start/done 仍会通知）
+          const shouldNotify = makeProgressThrottler({ everyN: 10, minIntervalMs: 5000 });
+
+          if (notifyGuard.isEnabled()) notifyStart(scopeTitle, total);
           pushUiProgress({
             scopeTitle,
-            stage: "progress",
-            processed,
+            stage: "start",
+            processed: 0,
             total,
-            ok: okCount,
-            failed: failCount,
-            currentCollectionId: cid,
-            currentCollectionTitle: title
+            ok: 0,
+            failed: 0
           });
 
-          for (const url of urls) {
+          for (let i = 0; i < urls.length; i++) {
+            const url = urls[i];
+            let file = "";
+            let lastName = "";
             try {
               const tab = await openHiddenTab(url);
               await sleep(800);
@@ -546,12 +478,166 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               await safeRemoveTab(tab.id);
 
               if (extracted?.ok && extracted.md && extracted.fileBaseName) {
-                const file = `${folder}/${safeFilename(extracted.fileBaseName)}.md`;
+                lastName = extracted.fileBaseName;
+                file = `${folder}/${safeFilename(extracted.fileBaseName)}.md`;
                 await downloadMarkdownFile(file, extracted.md);
                 okCount++;
-                processed++;
+              } else {
+                failCount++;
+              }
+            } catch (e) {
+              console.error(
+                "export one item failed:",
+                url,
+                "file:",
+                JSON.stringify(file),
+                "len:",
+                String(file || "").length,
+                e
+              );
+              failCount++;
+            }
 
-                // popup 需要“每完成一个文件就更新”的状态
+            processed++;
+
+            if (shouldNotify(processed) && notifyGuard.isEnabled()) {
+              notifyProgress(scopeTitle, processed, total, okCount, failCount);
+            }
+
+            pushUiProgress({
+              scopeTitle,
+              stage: "progress",
+              processed,
+              total,
+              ok: okCount,
+              failed: failCount,
+              lastUrl: url,
+              lastFileBaseName: lastName,
+              lastFile: file
+            });
+
+            await sleep(delay);
+          }
+
+          // 记录一次统计：剔除 delay 后的平均耗时（供 popup 预估使用）
+          try {
+            const endTs = Date.now();
+            const elapsedSec = (endTs - startTs) / 1000;
+            const delaySec = (Number(delay) || 0) / 1000 * urls.length;
+            const coreElapsedSec = Math.max(0, elapsedSec - delaySec);
+            const coreAvgSecPerItem = urls.length ? coreElapsedSec / urls.length : 3;
+            await chrome.storage.local.set({
+              zhihuExporterStats: {
+                coreAvgSecPerItem,
+                updatedAt: new Date().toISOString()
+              }
+            });
+          } catch (_) {}
+
+          if (notifyGuard.isEnabled()) notifyDone(scopeTitle, processed, total, okCount, failCount);
+          pushUiProgress({
+            scopeTitle,
+            stage: "done",
+            processed,
+            total,
+            ok: okCount,
+            failed: failCount
+          });
+          sendResponse({ ok: true, filename: `${folder}/...`, count: okCount });
+          return;
+        } finally {
+          notifyGuard.dispose();
+        }
+      }
+
+      if (msg?.type === "EXPORT_ALL_COLLECTIONS") {
+        const { urlToken, originTabId, limit = 200 } = msg;
+        const delay = FIXED_DELAY_MS;
+        const notifyGuard = await createActiveTabNotifyGuard(originTabId);
+
+        try {
+          const startTs = Date.now();
+          const collections = await listMemberCollections(urlToken, 200);
+          let okCount = 0;
+          let failCount = 0;
+          let processed = 0;
+          let total = 0;
+
+          const scopeTitle = `用户 ${urlToken} 全部收藏夹`;
+          // Windows 通知过于频繁会打扰用户：对“进度通知”做节流（start/done 仍会通知）
+          const shouldNotify = makeProgressThrottler({ everyN: 10, minIntervalMs: 5000 });
+
+          if (notifyGuard.isEnabled()) notifyStart(scopeTitle, 0); // total 先未知，后面动态更新
+          pushUiProgress({
+            scopeTitle,
+            stage: "start",
+            processed: 0,
+            total: 0,
+            ok: 0,
+            failed: 0
+          });
+
+          for (const col of collections) {
+            const cid = col.id;
+            const title = col.title || String(cid);
+            const folder = buildFolderName(`zhihu_${urlToken}/${title}_${cid}`);
+
+            const items = await listCollectionItems(cid, limit);
+            const urls = items.map(itemToUrl).filter(Boolean);
+            total += urls.length;
+
+            // 每次发现新增总量，顺便更新一下通知（不频繁）
+            if (notifyGuard.isEnabled()) {
+              notifyProgress(scopeTitle, processed, total, okCount, failCount);
+            }
+            pushUiProgress({
+              scopeTitle,
+              stage: "progress",
+              processed,
+              total,
+              ok: okCount,
+              failed: failCount,
+              currentCollectionId: cid,
+              currentCollectionTitle: title
+            });
+
+            for (const url of urls) {
+              try {
+                const tab = await openHiddenTab(url);
+                await sleep(800);
+
+                const extracted = await extractFromTab(tab.id);
+                await safeRemoveTab(tab.id);
+
+                if (extracted?.ok && extracted.md && extracted.fileBaseName) {
+                  const file = `${folder}/${safeFilename(extracted.fileBaseName)}.md`;
+                  await downloadMarkdownFile(file, extracted.md);
+                  okCount++;
+                  processed++;
+
+                  // popup 需要“每完成一个文件就更新”的状态
+                  pushUiProgress({
+                    scopeTitle,
+                    stage: "progress",
+                    processed,
+                    total,
+                    ok: okCount,
+                    failed: failCount,
+                    currentCollectionId: cid,
+                    currentCollectionTitle: title,
+                    lastUrl: url,
+                    lastFileBaseName: extracted.fileBaseName,
+                    lastFile: file
+                  });
+
+                  if (shouldNotify(processed) && notifyGuard.isEnabled()) {
+                    notifyProgress(scopeTitle, processed, total, okCount, failCount);
+                  }
+                }
+              } catch (e) {
+                console.error("export item failed:", url, e);
+                failCount++;
+                processed++;
                 pushUiProgress({
                   scopeTitle,
                   stage: "progress",
@@ -561,77 +647,60 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                   failed: failCount,
                   currentCollectionId: cid,
                   currentCollectionTitle: title,
-                  lastUrl: url,
-                  lastFileBaseName: extracted.fileBaseName,
-                  lastFile: file
+                  lastUrl: url
                 });
-
-                if (shouldNotify(processed)) {
+                if (shouldNotify(processed) && notifyGuard.isEnabled()) {
                   notifyProgress(scopeTitle, processed, total, okCount, failCount);
                 }
               }
-            } catch (e) {
-              console.error("export item failed:", url, e);
-              failCount++;
-              processed++;
-              pushUiProgress({
-                scopeTitle,
-                stage: "progress",
-                processed,
-                total,
-                ok: okCount,
-                failed: failCount,
-                currentCollectionId: cid,
-                currentCollectionTitle: title,
-                lastUrl: url
-              });
-              if (shouldNotify(processed)) {
-                notifyProgress(scopeTitle, processed, total, okCount, failCount);
-              }
+
+              await sleep(delay);
             }
 
-            await sleep(delay);
+            await sleep(400);
           }
 
-          await sleep(400);
-        }
-
-        sendResponse({
-          ok: true,
-          filename: `zhihu_${urlToken}/...`,
-          count: okCount
-        });
-
-        notifyDoneText({
-          title: "知乎全部收藏导出完成",
-          message: `用户 ${urlToken}：成功导出 ${okCount} 篇回答`
-        });
-
-        pushUiProgress({
-          scopeTitle,
-          stage: "done",
-          processed,
-          total,
-          ok: okCount,
-          failed: failCount
-        });
-
-        // 同样记录一次统计（剔除 delay）
-        try {
-          const endTs = Date.now();
-          const elapsedSec = (endTs - startTs) / 1000;
-          const delaySec = (Number(delay) || 0) / 1000 * processed;
-          const coreElapsedSec = Math.max(0, elapsedSec - delaySec);
-          const coreAvgSecPerItem = processed ? coreElapsedSec / processed : 3;
-          await chrome.storage.local.set({
-            zhihuExporterStats: {
-              coreAvgSecPerItem,
-              updatedAt: new Date().toISOString()
-            }
+          sendResponse({
+            ok: true,
+            filename: `zhihu_${urlToken}/...`,
+            count: okCount
           });
-        } catch (_) {}
 
-        return;
+          if (notifyGuard.isEnabled()) {
+            notifyDoneText({
+              title: "知乎全部收藏导出完成",
+              message: `用户 ${urlToken}：成功导出 ${okCount} 篇回答`
+            });
+          }
+
+          pushUiProgress({
+            scopeTitle,
+            stage: "done",
+            processed,
+            total,
+            ok: okCount,
+            failed: failCount
+          });
+
+          // 同样记录一次统计（剔除 delay）
+          try {
+            const endTs = Date.now();
+            const elapsedSec = (endTs - startTs) / 1000;
+            const delaySec = (Number(delay) || 0) / 1000 * processed;
+            const coreElapsedSec = Math.max(0, elapsedSec - delaySec);
+            const coreAvgSecPerItem = processed ? coreElapsedSec / processed : 3;
+            await chrome.storage.local.set({
+              zhihuExporterStats: {
+                coreAvgSecPerItem,
+                updatedAt: new Date().toISOString()
+              }
+            });
+          } catch (_) {}
+
+          return;
+        } finally {
+          notifyGuard.dispose();
+        }
       }
 
       sendResponse({ ok: false, error: "unknown message type" });
