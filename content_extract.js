@@ -56,6 +56,38 @@ function pickAuthorName() {
   return "";
 }
 
+function normalizeInlineText(s) {
+  // 把多余空白压缩成单个空格，避免出现换行/多个空格
+  return String(s || "").replace(/\s+/g, " ").trim();
+}
+
+function pickContentItemTimeText() {
+  // 示例：编辑于 2025-12-26 01:36・广东
+  // 页面结构可能不同：尽量就近从当前内容块中取；取不到再全局兜底
+  const candidates = [];
+
+  if (isZhihuAnswerUrl()) {
+    candidates.push(
+      document.querySelector(".AnswerItem .ContentItem-time"),
+      document.querySelector(".ContentItem .ContentItem-time")
+    );
+  } else if (isZhihuArticleUrl()) {
+    candidates.push(
+      document.querySelector("article .ContentItem-time"),
+      document.querySelector(".Post-Main .ContentItem-time")
+    );
+  }
+
+  candidates.push(document.querySelector(".ContentItem-time"));
+
+  for (const el of candidates) {
+    const t = normalizeInlineText(text(el));
+    if (t) return t;
+  }
+
+  return "";
+}
+
 function pickAnswerContentRoot() {
   // 回答正文最常见容器
   const root =
@@ -265,6 +297,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const url = location.href;
     const title = isZhihuArticleUrl() ? pickArticleTitle() : pickQuestionTitle();
     const author = pickAuthorName();
+    const contentTimeText = pickContentItemTimeText();
 
     let root = isZhihuAnswerUrl()
       ? pickAnswerContentRoot()
@@ -288,20 +321,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // 每篇一个文件的文件名：标题 + 作者（统一规则：不追加 answerId / articleId）
     const fileBaseName = `${title}${author ? " - " + author : ""}`;
 
-    const metaLines = [
-      `- ${title}`,
-      author ? `- 作者：${author}` : null,
-      `- 链接：${url}`
-    ].filter((x) => x !== null && x !== undefined);
-
     const md =
       buildFrontMatter({ title, author, url }) +
       "\n" +
-      metaLines.join("\n") +
-      "\n\n" +
-      (bodyMd ? bodyMd + "\n" : "");
+      (bodyMd ? bodyMd + "\n" : "") +
+      (contentTimeText ? "\n" + contentTimeText + "\n" : "");
 
-    sendResponse({ ok: true, md, title, url, fileBaseName });
+    sendResponse({ ok: true, md, title, url, fileBaseName, contentTimeText });
   })();
 
   return true;
