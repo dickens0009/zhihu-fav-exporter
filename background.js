@@ -384,14 +384,70 @@ async function convertHtmlToMarkdownOffscreen(html, baseUrl) {
   return resp.md || "";
 }
 
-function formatLocalDateTime(tsSec) {
-  const n = Number(tsSec);
+async function extractTextFromHtmlOffscreen(html, selector) {
+  await ensureOffscreenDocument();
+  const resp = await chrome.runtime.sendMessage({
+    type: "OFFSCREEN_EXTRACT_TEXT",
+    html,
+    selector
+  });
+  if (!resp?.ok) throw new Error(resp?.error || "offscreen extract failed");
+  return resp.text || "";
+}
+
+function formatLocalDateTime(ts) {
+  const n = Number(ts);
   if (!Number.isFinite(n) || n <= 0) return "";
-  const d = new Date(n * 1000);
+  // 兼容秒/毫秒时间戳：毫秒通常是 13 位（> 2e10），秒通常是 10 位
+  const ms = n > 2e10 ? n : n * 1000;
+  const d = new Date(ms);
   const pad = (x) => String(x).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
     d.getHours()
   )}:${pad(d.getMinutes())}`;
+}
+
+function pickFirstString(...vals) {
+  for (const v of vals) {
+    const s = typeof v === "string" ? v.trim() : "";
+    if (s) return s;
+  }
+  return "";
+}
+
+function formatTimeLocationLine(prefix, timeText, locationText) {
+  if (!timeText && !locationText) return "";
+  if (timeText && locationText) return `${prefix} ${timeText}・${locationText}`;
+  if (timeText) return `${prefix} ${timeText}`;
+  return `${prefix} ${locationText}`;
+}
+
+function parseZvideoMetaLine(metaText) {
+  const s = String(metaText || "").trim();
+  // 例：发布于 2024-02-06 11:30・河北・2.6 万次播放
+  const m = s.match(/^(发布于|编辑于)\s*([^・]+?)\s*・\s*([^・]+?)(?:\s*・\s*(.+))?$/);
+  if (m) {
+    return {
+      prefix: m[1],
+      timeText: (m[2] || "").trim(),
+      locationText: (m[3] || "").trim(),
+      restText: (m[4] || "").trim()
+    };
+  }
+  return { prefix: "", timeText: "", locationText: "", restText: "" };
+}
+
+async function fetchZvideoMetaFromPage(baseUrl) {
+  const resp = await fetch(baseUrl, { credentials: "include" });
+  if (!resp.ok) throw new Error(`zvideo page ${resp.status}: ${baseUrl}`);
+  const html = await resp.text();
+
+  const meta = await extractTextFromHtmlOffscreen(html, ".ZVideo-meta");
+  if (meta) return meta;
+
+  // 兜底：结构变更时仍尽力匹配
+  const meta2 = await extractTextFromHtmlOffscreen(html, '[class*="ZVideo-meta"]');
+  return meta2 || "";
 }
 
 function buildFrontMatter({ title, author, url }) {
@@ -475,6 +531,143 @@ async function zhihuArticleToMarkdown(articleId) {
   return { ok: true, md, title, url, fileBaseName, contentTimeText };
 }
 
+function stripHtmlTags(html) {
+  return String(html || "")
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, "")
+    .replace(/<\/?[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function zhihuPinToMarkdown(pinId) {
+  const baseUrl = `https://www.zhihu.com/pin/${pinId}`;
+  const include = ["content", "created_time", "updated_time", "author.name", "title", "excerpt_title"].join(
+    ","
+  );
+  let data = null;
+  try {
+    data = await zhihuApiGet(
+      `https://www.zhihu.com/api/v4/pins/${pinId}?include=${encodeURIComponent(include)}`
+    );
+  } catch (_) {
+    data = await zhihuApiGet(`https://www.zhihu.com/api/v4/pins/${pinId}`);
+  }
+
+  const author = String(data?.author?.name || "").trim();
+  const html = String(data?.content || "");
+  const titleFromApi = String(data?.title || data?.excerpt_title || "").trim();
+  const title = titleFromApi || (stripHtmlTags(html).slice(0, 50) || "Untitled");
+
+  const bodyMd = html ? await convertHtmlToMarkdownOffscreen(html, baseUrl) : "";
+  const updated = formatLocalDateTime(data?.updated_time);
+  const created = formatLocalDateTime(data?.created_time);
+  const contentTimeText = updated ? `编辑于 ${updated}` : created ? `发布于 ${created}` : "";
+
+  const fileBaseName = `${title}${author ? " - " + author : ""}`;
+  const md =
+    buildFrontMatter({ title, author, url: baseUrl }) +
+    "\n" +
+    (bodyMd ? bodyMd + "\n" : "") +
+    (contentTimeText ? "\n" + contentTimeText + "\n" : "");
+
+  return { ok: true, md, title, url: baseUrl, fileBaseName, contentTimeText };
+}
+
+async function zhihuZvideoToMarkdown(zvideoId) {
+  const baseUrl = `https://www.zhihu.com/zvideo/${zvideoId}`;
+  const include = [
+    "title",
+    "created_time",
+    "updated_time",
+    "description",
+    "author.name",
+    // 位置字段在不同返回里名字不一，这里尽量 request，服务端不认识会忽略
+    "ip_location",
+    "ip_location.name",
+    "ip_location_name",
+    "cover_url",
+    "cover.url",
+    "thumbnail_url",
+    "play_url"
+  ].join(",");
+
+  let data = null;
+  try {
+    data = await zhihuApiGet(
+      `https://www.zhihu.com/api/v4/zvideos/${zvideoId}?include=${encodeURIComponent(include)}`
+    );
+  } catch (_) {
+    data = await zhihuApiGet(`https://www.zhihu.com/api/v4/zvideos/${zvideoId}`);
+  }
+
+  const title = String(data?.title || "").trim() || `ZVideo_${zvideoId}`;
+  const author = String(data?.author?.name || "").trim();
+  const coverUrl = pickFirstString(
+    data?.cover_url,
+    data?.cover?.url,
+    data?.cover?.original,
+    data?.thumbnail_url,
+    data?.thumbnail?.url,
+    data?.image_url,
+    data?.image?.url,
+    data?.video?.cover_url,
+    data?.video?.thumbnail_url,
+    data?.video?.cover?.url
+  );
+  const playUrl = pickFirstString(data?.play_url, data?.video?.play_url, data?.video?.url);
+  const locationText = pickFirstString(
+    data?.ip_location?.name,
+    data?.ip_location_name,
+    data?.ip_location,
+    data?.location,
+    data?.author?.ip_location?.name,
+    data?.author?.ip_location_name
+  );
+
+  const desc = data?.description ?? data?.content ?? "";
+  const descStr = String(desc || "");
+  const descLooksHtml = /<\/?[a-z][\s\S]*>/i.test(descStr);
+  const descMd = descLooksHtml
+    ? await convertHtmlToMarkdownOffscreen(descStr, baseUrl)
+    : (descStr ? descStr.trim() : "");
+
+  const updated = formatLocalDateTime(data?.updated_time);
+  const created = formatLocalDateTime(data?.created_time);
+  const contentTimeText = updated
+    ? formatTimeLocationLine("编辑于", updated, locationText)
+    : created
+      ? formatTimeLocationLine("发布于", created, locationText)
+      : (locationText ? formatTimeLocationLine("发布于", "", locationText) : "");
+
+  // 兜底：API 不给时间/地点时，从页面 .ZVideo-meta 中提取（不打开 tab）
+  let finalTimeLine = contentTimeText;
+  if (!finalTimeLine) {
+    try {
+      const metaLine = await fetchZvideoMetaFromPage(baseUrl);
+      const parsed = parseZvideoMetaLine(metaLine);
+      // 只保留“发布于/编辑于 + 时间 + 地点”，忽略播放量等尾巴
+      if (parsed?.prefix && (parsed.timeText || parsed.locationText)) {
+        finalTimeLine = formatTimeLocationLine(parsed.prefix, parsed.timeText, parsed.locationText);
+      }
+    } catch (_) {}
+  }
+
+  const fileBaseName = `${title}${author ? " - " + author : ""}`;
+
+  const lines = [];
+  lines.push(buildFrontMatter({ title, author, url: baseUrl }));
+  lines.push("");
+  lines.push(`[在知乎观看](${baseUrl})`);
+  if (playUrl) lines.push(`直链：${playUrl}`);
+  if (coverUrl) lines.push(`\n<img src="${coverUrl}" width="800">`);
+  if (descMd) lines.push("\n" + descMd);
+  if (finalTimeLine) lines.push("\n" + finalTimeLine);
+  const md = lines.join("\n") + "\n";
+
+  return { ok: true, md, title, url: baseUrl, fileBaseName, contentTimeText: finalTimeLine };
+}
+
 // 可选：按收藏夹分目录保存（Chrome 下载会创建子目录）
 function buildFolderName(prefix) {
   return safePath(prefix);
@@ -542,6 +735,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 extracted = await zhihuAnswerToMarkdown(c.id);
               } else if (c?.type === "article" && c.id) {
                 extracted = await zhihuArticleToMarkdown(c.id);
+              } else if (c?.type === "pin" && c.id) {
+                extracted = await zhihuPinToMarkdown(c.id);
+              } else if (c?.type === "zvideo" && c.id) {
+                extracted = await zhihuZvideoToMarkdown(c.id);
               } else {
                 extracted = null;
               }
@@ -678,6 +875,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                   extracted = await zhihuAnswerToMarkdown(c.id);
                 } else if (c?.type === "article" && c.id) {
                   extracted = await zhihuArticleToMarkdown(c.id);
+                } else if (c?.type === "pin" && c.id) {
+                  extracted = await zhihuPinToMarkdown(c.id);
+                } else if (c?.type === "zvideo" && c.id) {
+                  extracted = await zhihuZvideoToMarkdown(c.id);
                 } else {
                   extracted = null;
                 }

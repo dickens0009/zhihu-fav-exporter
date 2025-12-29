@@ -34,6 +34,7 @@
 - **不再打开新标签页**：
   - 后台直接调用知乎 API 拉取 `content`（HTML）
   - 使用 MV3 `offscreen document` 在后台将 HTML 转为 Markdown（全程不创建/关闭 tab）
+- **支持类型**：`answer`（回答）、`article`（专栏文章）、`pin`（想法）、`zvideo`（视频，导出为“链接 + 封面 + 描述”）
 - **Markdown 结构清晰**：
   - 每篇内容单独生成一个 `.md`
   - 自动附带 YAML Front Matter（`title / author / source / exported_at`）
