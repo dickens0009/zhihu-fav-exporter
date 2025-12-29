@@ -8,6 +8,10 @@ function htmlToMarkdown(rootEl, opts = {}) {
   const escapeHtmlAttr = (s) => String(s ?? "").replace(/"/g, "&quot;");
   const normalizeEol = (s) => String(s ?? "").replace(/\r\n?/g, "\n");
   const escapeMathDollar = (s) => String(s ?? "").replace(/\$/g, "\\$");
+  const parsePositiveInt = (v) => {
+    const n = parseInt(String(v ?? "").trim(), 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
   const longestRun = (s, ch) => {
     const str = String(s ?? "");
     let max = 0;
@@ -79,7 +83,21 @@ function htmlToMarkdown(rootEl, opts = {}) {
       return src;
     }
   };
-  const imgHtml = (src) => `<img src="${escapeHtmlAttr(src)}" width="800">`;
+
+  // 图片最大展示宽度：默认 800；若图片原宽小于该值，则按原尺寸展示
+  const maxImageWidth = (() => {
+    const n = Number(opts?.maxImageWidth);
+    return Number.isFinite(n) && n > 0 ? n : 800;
+  })();
+
+  const imgHtml = (src, { alt, width, height } = {}) => {
+    const attrs = [];
+    attrs.push(`src="${escapeHtmlAttr(src)}"`);
+    if (alt) attrs.push(`alt="${escapeHtmlAttr(alt)}"`);
+    if (width) attrs.push(`width="${parsePositiveInt(width)}"`);
+    if (height) attrs.push(`height="${parsePositiveInt(height)}"`);
+    return `<img ${attrs.join(" ")}>`;
+  };
 
   const extractTexFromImg = (imgEl) => {
     if (!imgEl) return "";
@@ -320,8 +338,34 @@ function htmlToMarkdown(rootEl, opts = {}) {
         "";
       const abs = toAbsUrl(src);
       if (!abs) return "";
-      // 这里直接输出 HTML，满足“width=800”的要求；Markdown 渲染器一般会保留 HTML 标签
-      return imgHtml(abs);
+
+      const alt = (node.getAttribute?.("alt") || "").trim();
+
+      // 知乎图片常见：data-rawwidth/data-rawheight；也可能直接有 width/height
+      const rawW =
+        parsePositiveInt(node.getAttribute?.("data-rawwidth")) ||
+        parsePositiveInt(node.getAttribute?.("data-raw-width")) ||
+        parsePositiveInt(node.getAttribute?.("width"));
+      const rawH =
+        parsePositiveInt(node.getAttribute?.("data-rawheight")) ||
+        parsePositiveInt(node.getAttribute?.("data-raw-height")) ||
+        parsePositiveInt(node.getAttribute?.("height"));
+
+      // 默认行为：大图限制最大宽度；小图按原尺寸展示
+      let outW = 0;
+      let outH = 0;
+      if (rawW) {
+        outW = rawW <= maxImageWidth ? rawW : maxImageWidth;
+        if (rawH) {
+          outH = rawW <= maxImageWidth ? rawH : Math.round((rawH * maxImageWidth) / rawW);
+        }
+      } else {
+        // 拿不到原图宽度时，保持旧行为：兜底 width=800
+        outW = maxImageWidth;
+      }
+
+      // 这里直接输出 HTML，Markdown 渲染器一般会保留 HTML 标签
+      return imgHtml(abs, { alt, width: outW, height: outH });
     }
 
     if (tag === "ul") {

@@ -212,9 +212,133 @@ function safePath(pathLike) {
 }
 
 async function zhihuApiGet(url) {
-  const resp = await fetch(url, { credentials: "include" });
-  if (!resp.ok) throw new Error(`API ${resp.status}: ${url}`);
+  const resp = await fetch(url, {
+    credentials: "include",
+    headers: {
+      // 少数情况下知乎会对“非浏览器习惯”的请求更敏感；这里补齐常见 accept
+      accept: "application/json, text/plain, */*"
+    }
+  });
+  if (!resp.ok) {
+    let body = "";
+    try {
+      body = await resp.text();
+    } catch (_) {}
+    const snippet = body ? body.slice(0, 300) : "";
+    const err = new Error(`API ${resp.status}: ${url}${snippet ? ` | ${snippet}` : ""}`);
+    err.status = resp.status;
+    err.url = url;
+    err.body = body;
+    throw err;
+  }
   return await resp.json();
+}
+
+function extractScriptJsonById(html, id) {
+  const h = String(html || "");
+  const re = new RegExp(`<script[^>]*\\bid=["']${id}["'][^>]*>([\\s\\S]*?)<\\/script>`, "i");
+  const m = h.match(re);
+  if (!m) return null;
+  const txt = String(m[1] || "").trim();
+  if (!txt) return null;
+  try {
+    return JSON.parse(txt);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function zhihuPageGetHtml(url) {
+  const resp = await fetch(url, {
+    credentials: "include",
+    headers: {
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
+  });
+  if (!resp.ok) {
+    let body = "";
+    try {
+      body = await resp.text();
+    } catch (_) {}
+    const snippet = body ? body.slice(0, 300) : "";
+    const err = new Error(`page ${resp.status}: ${url}${snippet ? ` | ${snippet}` : ""}`);
+    err.status = resp.status;
+    err.url = url;
+    err.body = body;
+    throw err;
+  }
+  return await resp.text();
+}
+
+function pickZhihuInitialStateFromHtml(html) {
+  // 知乎传统：<script id="js-initialData" type="application/json">...</script>
+  const init = extractScriptJsonById(html, "js-initialData");
+  if (init?.initialState) return init.initialState;
+  if (init?.state) return init.state;
+  if (init) return init;
+
+  // 兼容：Next.js 页面可能是 <script id="__NEXT_DATA__" type="application/json">...</script>
+  const next = extractScriptJsonById(html, "__NEXT_DATA__");
+  const pp = next?.props?.pageProps;
+  if (pp?.initialState) return pp.initialState;
+  if (pp?.state) return pp.state;
+  return null;
+}
+
+function pickZhihuAnswerEntity(initialState, answerId) {
+  const id = String(answerId || "");
+  const entities = initialState?.entities || initialState?.initialState?.entities;
+  const answers = entities?.answers;
+  if (answers && Object.prototype.hasOwnProperty.call(answers, id)) return answers[id];
+  return null;
+}
+
+function pickZhihuQuestionEntity(initialState, qid) {
+  const id = String(qid || "");
+  const entities = initialState?.entities || initialState?.initialState?.entities;
+  const questions = entities?.questions;
+  if (questions && Object.prototype.hasOwnProperty.call(questions, id)) return questions[id];
+  return null;
+}
+
+async function zhihuAnswerToMarkdownViaPage(answerId) {
+  // 不需要 questionId：/answer/{id} 通常会 302 到 canonical URL
+  const pageUrl = `https://www.zhihu.com/answer/${answerId}`;
+  const htmlPage = await zhihuPageGetHtml(pageUrl);
+  const initialState = pickZhihuInitialStateFromHtml(htmlPage);
+  if (!initialState) {
+    throw new Error(`无法从回答页面解析 initialState（可能是知乎结构变更或被风控）：${pageUrl}`);
+  }
+
+  const ans = pickZhihuAnswerEntity(initialState, answerId);
+  if (!ans) {
+    throw new Error(`回答页面中找不到 answers[${answerId}]（可能无权限/已删除）：${pageUrl}`);
+  }
+
+  const qid = ans?.question?.id || ans?.questionId || ans?.question_id;
+  const q = qid ? pickZhihuQuestionEntity(initialState, qid) : null;
+
+  const title = String(q?.title || "").trim() || "Untitled";
+  const author = String(ans?.author?.name || ans?.author?.nickname || "").trim();
+  const html = String(ans?.content || "");
+  const url = qid
+    ? `https://www.zhihu.com/question/${qid}/answer/${answerId}`
+    : pageUrl;
+
+  const bodyMd = html ? await convertHtmlToMarkdownOffscreen(html, url) : "";
+
+  const updated = formatLocalDateTime(ans?.updatedTime || ans?.updated_time);
+  const created = formatLocalDateTime(ans?.createdTime || ans?.created_time);
+  const contentTimeText = updated ? `编辑于 ${updated}` : created ? `发布于 ${created}` : "";
+
+  const fileBaseName = `${title}${author ? " - " + author : ""}`;
+  const md =
+    buildFrontMatter({ title, author, url }) +
+    "\n" +
+    (bodyMd ? bodyMd + "\n" : "") +
+    (contentTimeText ? "\n" + contentTimeText + "\n" : "");
+
+  return { ok: true, md, title, url, fileBaseName, contentTimeText };
 }
 
 async function getCollectionTotal(collectionId) {
@@ -476,7 +600,18 @@ async function zhihuAnswerToMarkdown(answerId) {
   const api = `https://www.zhihu.com/api/v4/answers/${answerId}?include=${encodeURIComponent(
     include
   )}`;
-  const data = await zhihuApiGet(api);
+
+  let data = null;
+  try {
+    data = await zhihuApiGet(api);
+  } catch (e) {
+    // 403 常见原因：登录态缺失/接口风控/内容权限不足。
+    // 为了不让“单条 403 直接失败”，这里自动降级：抓取回答页面并从 initialState 解析内容。
+    if (Number(e?.status) === 403) {
+      return await zhihuAnswerToMarkdownViaPage(answerId);
+    }
+    throw e;
+  }
 
   const title = String(data?.question?.title || "").trim() || "Untitled";
   const author = String(data?.author?.name || "").trim();
