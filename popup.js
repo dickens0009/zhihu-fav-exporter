@@ -62,13 +62,6 @@ function fmtDuration(sec) {
   return `${ss}s`;
 }
 
-async function getStats() {
-  const data = await chrome.storage.local.get("zhihuExporterStats").catch(() => ({}));
-  const coreAvg = Number(data?.zhihuExporterStats?.coreAvgSecPerItem ?? 3);
-  // 兜底：避免出现 0/NaN/极端值
-  return { coreAvgSecPerItem: coreAvg > 0.2 && coreAvg < 120 ? coreAvg : 3 };
-}
-
 function readDelayMs() {
   return FIXED_DELAY_MS;
 }
@@ -82,11 +75,11 @@ function getRangeMode() {
   return $("rangeAll")?.checked ? "all" : "latest";
 }
 
-function updateEstimate({ totalItems, stats }) {
+function updateEstimate({ totalItems }) {
   const total = Number(totalItems);
   const hasTotal = Number.isFinite(total) && total > 0;
-  const delaySec = readDelayMs() / 1000;
-  const core = Number(stats?.coreAvgSecPerItem ?? 3);
+  // 预计耗时：按“每条固定耗时 FIXED_DELAY_MS”线性估算
+  const perItemSec = readDelayMs() / 1000;
 
   const estimateEl = $("estimate");
   if (!estimateEl) return;
@@ -97,13 +90,13 @@ function updateEstimate({ totalItems, stats }) {
       return;
     }
     const n = total;
-    estimateEl.textContent = `${fmtDuration(n * (core + delaySec))}（按 ${n} 条）`;
+    estimateEl.textContent = `${fmtDuration(n * perItemSec)}（按 ${n} 条）`;
     return;
   }
 
   const n0 = readLimitN();
   const n = hasTotal ? Math.min(n0, total) : n0;
-  estimateEl.textContent = `${fmtDuration(n * (core + delaySec))}（按 ${n} 条）`;
+  estimateEl.textContent = `${fmtDuration(n * perItemSec)}（按 ${n} 条）`;
 }
 
 async function refreshCollectionTotal(collectionId) {
@@ -196,7 +189,6 @@ $("exportAllCollections").addEventListener("click", exportAllCollections);
   const ctxResp = await getContext(tab.id);
   const ctx = ctxResp?.ctx;
 
-  const stats = await getStats();
   let totalItems = null;
 
   // 默认：先隐藏收藏夹专属 UI
@@ -241,16 +233,16 @@ $("exportAllCollections").addEventListener("click", exportAllCollections);
     const onRangeChange = () => {
       const nInput = $("limit");
       if (nInput) nInput.disabled = getRangeMode() === "all";
-      updateEstimate({ totalItems, stats });
+      updateEstimate({ totalItems });
     };
     $("rangeLatest")?.addEventListener("change", onRangeChange);
     $("rangeAll")?.addEventListener("change", onRangeChange);
-    $("limit")?.addEventListener("input", () => updateEstimate({ totalItems, stats }));
+    $("limit")?.addEventListener("input", () => updateEstimate({ totalItems }));
 
     // 初次渲染
     const nInput = $("limit");
     if (nInput) nInput.disabled = getRangeMode() === "all";
-    updateEstimate({ totalItems, stats });
+    updateEstimate({ totalItems });
     return;
   }
 
