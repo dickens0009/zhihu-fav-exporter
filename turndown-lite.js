@@ -253,6 +253,12 @@ function htmlToMarkdown(rootEl, opts = {}) {
       if (/^\$\$\s*[\s\S]*\s*\$\$$/.test(trimmed) || trimmed.includes("\n$$\n") || trimmed.startsWith("$$\n")) {
         return `${trimmed}\n\n`;
       }
+
+      // 链接卡片（LinkCard）在知乎里通常是块级元素：需要保留/强制换行，避免与后续正文粘连
+      // 示例：<a class="LinkCard" data-draft-type="link-card" ...>...</a>
+      if (node.querySelector?.('a.LinkCard, a[data-draft-type="link-card"]')) {
+        return `${trimmed}\n\n`;
+      }
       return trimmed.replace(/\n/g, "").trim() ? `${trimmed.replace(/\n/g, "")}\n\n` : "";
     }
     if (tag === "h1") {
@@ -287,12 +293,23 @@ function htmlToMarkdown(rootEl, opts = {}) {
 
     if (tag === "a") {
       const href = node.getAttribute("href") || "";
+
+      // 链接卡片：用标题作为文本，并在末尾追加空行，避免与后续文本粘连
+      const isLinkCard =
+        node.classList?.contains("LinkCard") ||
+        node.getAttribute("data-draft-type") === "link-card" ||
+        node.getAttribute("data-draft-type") === "link_card";
+      const cardTitle = isLinkCard
+        ? trimSpaces(node.querySelector?.(".LinkCard-title")?.textContent || "").trim()
+        : "";
+
       const t = childText.trim();
-      const text = t || href;
+      const text = cardTitle || t || href;
       if (!href) return text;
       // 知乎相对链接补全
       const abs = href.startsWith("http") ? href : new URL(href, location.href).href;
-      return `[${escapeMd(text)}](${abs})`;
+      const md = `[${escapeMd(text)}](${abs})`;
+      return isLinkCard ? `${md}\n\n` : md;
     }
 
     if (tag === "img") {
