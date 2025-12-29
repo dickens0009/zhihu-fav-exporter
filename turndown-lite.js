@@ -1,4 +1,4 @@
-function htmlToMarkdown(rootEl) {
+function htmlToMarkdown(rootEl, opts = {}) {
   if (!rootEl) return "";
 
   const clone = rootEl.cloneNode(true);
@@ -54,14 +54,27 @@ function htmlToMarkdown(rootEl) {
     return lang;
   };
   const trimSpaces = (s) => String(s ?? "").replace(/^[ \t]+|[ \t]+$/g, "");
+  const baseHref =
+    (opts && typeof opts.baseUrl === "string" && opts.baseUrl.trim())
+      ? opts.baseUrl.trim()
+      : (typeof location !== "undefined" ? location.href : "");
+
+  const baseProtocol = (() => {
+    try {
+      return baseHref ? new URL(baseHref).protocol : "https:";
+    } catch {
+      return "https:";
+    }
+  })();
+
   const toAbsUrl = (u) => {
     const src = String(u || "").trim();
     if (!src) return "";
     if (src.startsWith("data:")) return "";
     if (src.startsWith("http://") || src.startsWith("https://")) return src;
-    if (src.startsWith("//")) return `${location.protocol}${src}`;
+    if (src.startsWith("//")) return `${baseProtocol}${src}`;
     try {
-      return new URL(src, location.href).href;
+      return new URL(src, baseHref || undefined).href;
     } catch {
       return src;
     }

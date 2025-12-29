@@ -16,7 +16,7 @@
         "128": "icon128.png"
       }
     },
-    "permissions": ["tabs", "downloads", "storage","notifications"],
+    "permissions": ["tabs", "downloads", "storage", "notifications", "offscreen"],
     "host_permissions": ["https://www.zhihu.com/*", "https://zhuanlan.zhihu.com/*"],
     "background": { "service_worker": "background.js", "type": "module" },
     "content_scripts": [

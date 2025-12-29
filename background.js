@@ -352,66 +352,127 @@ async function downloadMarkdownFile(filename, content) {
   return downloadId;
 }
 
-async function openHiddenTab(url) {
-  const tab = await chrome.tabs.create({ url, active: false });
-  await waitTabComplete(tab.id);
-  return tab;
-}
-
-async function safeRemoveTab(tabId) {
-  if (!tabId) return;
-  try {
-    await chrome.tabs.remove(tabId);
-  } catch (_) {
-    // tab 可能已被提前关闭/崩溃/被浏览器回收，忽略即可
+// ===== Offscreen HTML -> Markdown =====
+async function ensureOffscreenDocument() {
+  if (!chrome.offscreen) {
+    throw new Error("chrome.offscreen is not available (need Chrome MV3 offscreen support)");
   }
-}
+  try {
+    const has = typeof chrome.offscreen.hasDocument === "function"
+      ? await chrome.offscreen.hasDocument()
+      : false;
+    if (has) return;
+  } catch (_) {
+    // 忽略：继续尝试 createDocument
+  }
 
-function waitTabComplete(tabId, { timeoutMs = 45000 } = {}) {
-  return new Promise((resolve, reject) => {
-    let done = false;
-    let timer = null;
-
-    const cleanup = () => {
-      chrome.tabs.onUpdated.removeListener(onUpdated);
-      chrome.tabs.onRemoved.removeListener(onRemoved);
-      if (timer) clearTimeout(timer);
-      timer = null;
-    };
-
-    const finishOk = () => {
-      if (done) return;
-      done = true;
-      cleanup();
-      resolve();
-    };
-
-    const finishErr = (err) => {
-      if (done) return;
-      done = true;
-      cleanup();
-      reject(err);
-    };
-
-    const onUpdated = (id, info) => {
-      if (id === tabId && info.status === "complete") finishOk();
-    };
-
-    const onRemoved = (id) => {
-      if (id === tabId) finishErr(new Error(`tab closed before complete: ${tabId}`));
-    };
-
-    chrome.tabs.onUpdated.addListener(onUpdated);
-    chrome.tabs.onRemoved.addListener(onRemoved);
-
-    timer = setTimeout(() => {
-      finishErr(new Error(`wait tab complete timeout (${timeoutMs}ms): ${tabId}`));
-    }, timeoutMs);
+  await chrome.offscreen.createDocument({
+    url: "offscreen.html",
+    reasons: [chrome.offscreen.Reason.DOM_PARSER],
+    justification: "Convert Zhihu HTML content to Markdown without opening tabs."
   });
 }
 
-async function extractFromTab(tabId) {
-  return await chrome.tabs.sendMessage(tabId, { type: "EXTRACT_PAGE" }).catch(() => null);
+async function convertHtmlToMarkdownOffscreen(html, baseUrl) {
+  await ensureOffscreenDocument();
+  const resp = await chrome.runtime.sendMessage({
+    type: "OFFSCREEN_CONVERT_HTML_TO_MD",
+    html,
+    baseUrl
+  });
+  if (!resp?.ok) throw new Error(resp?.error || "offscreen convert failed");
+  return resp.md || "";
+}
+
+function formatLocalDateTime(tsSec) {
+  const n = Number(tsSec);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  const d = new Date(n * 1000);
+  const pad = (x) => String(x).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
+    d.getHours()
+  )}:${pad(d.getMinutes())}`;
+}
+
+function buildFrontMatter({ title, author, url }) {
+  // 与 content_extract.js 保持一致（Obsidian 友好 YAML）
+  const esc = (s) => String(s || "").replace(/"/g, '\\"');
+  const lines = [
+    "---",
+    `title: "${esc(title)}"`,
+    author ? `author: "${esc(author)}"` : null,
+    `source: "${esc(url)}"`,
+    `exported_at: "${new Date().toISOString()}"`,
+    "---"
+  ].filter((x) => x !== null && x !== undefined);
+  return lines.join("\n") + "\n";
+}
+
+async function zhihuAnswerToMarkdown(answerId) {
+  const include = [
+    "content",
+    "created_time",
+    "updated_time",
+    "author.name",
+    "question.id",
+    "question.title"
+  ].join(",");
+  const api = `https://www.zhihu.com/api/v4/answers/${answerId}?include=${encodeURIComponent(
+    include
+  )}`;
+  const data = await zhihuApiGet(api);
+
+  const title = String(data?.question?.title || "").trim() || "Untitled";
+  const author = String(data?.author?.name || "").trim();
+  const html = String(data?.content || "");
+
+  const qid = data?.question?.id;
+  const url = qid
+    ? `https://www.zhihu.com/question/${qid}/answer/${answerId}`
+    : `https://www.zhihu.com/answer/${answerId}`;
+
+  const bodyMd = await convertHtmlToMarkdownOffscreen(html, url);
+
+  const updated = formatLocalDateTime(data?.updated_time);
+  const created = formatLocalDateTime(data?.created_time);
+  const contentTimeText = updated ? `编辑于 ${updated}` : created ? `发布于 ${created}` : "";
+
+  const fileBaseName = `${title}${author ? " - " + author : ""}`;
+  const md =
+    buildFrontMatter({ title, author, url }) +
+    "\n" +
+    (bodyMd ? bodyMd + "\n" : "") +
+    (contentTimeText ? "\n" + contentTimeText + "\n" : "");
+
+  return { ok: true, md, title, url, fileBaseName, contentTimeText };
+}
+
+async function zhihuArticleToMarkdown(articleId) {
+  const include = ["content", "title", "created_time", "updated_time", "author.name"].join(",");
+  const api = `https://www.zhihu.com/api/v4/articles/${articleId}?include=${encodeURIComponent(
+    include
+  )}`;
+  const data = await zhihuApiGet(api);
+
+  const title = String(data?.title || "").trim() || "Untitled";
+  const author = String(data?.author?.name || "").trim();
+  const html = String(data?.content || "");
+  const url = `https://zhuanlan.zhihu.com/p/${articleId}`;
+
+  const bodyMd = await convertHtmlToMarkdownOffscreen(html, url);
+
+  const updated = formatLocalDateTime(data?.updated_time);
+  const created = formatLocalDateTime(data?.created_time);
+  const contentTimeText = updated ? `编辑于 ${updated}` : created ? `发布于 ${created}` : "";
+
+  const fileBaseName = `${title}${author ? " - " + author : ""}`;
+  const md =
+    buildFrontMatter({ title, author, url }) +
+    "\n" +
+    (bodyMd ? bodyMd + "\n" : "") +
+    (contentTimeText ? "\n" + contentTimeText + "\n" : "");
+
+  return { ok: true, md, title, url, fileBaseName, contentTimeText };
 }
 
 // 可选：按收藏夹分目录保存（Chrome 下载会创建子目录）
@@ -422,6 +483,11 @@ function buildFolderName(prefix) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
+      // Offscreen 文档专用消息：background 不处理，避免抢答导致 offscreen 收不到响应
+      if (typeof msg?.type === "string" && msg.type.startsWith("OFFSCREEN_")) {
+        return;
+      }
+
       if (msg?.type === "GET_COLLECTION_TOTAL") {
         const { collectionId } = msg || {};
         if (!collectionId) {
@@ -441,9 +507,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const startTs = Date.now();
           const items = await listCollectionItems(collectionId, limit);
-          const urls = items.map(itemToUrl).filter(Boolean);
-
-          const total = urls.length;
+          const total = items.length;
           let processed = 0;
           let okCount = 0;
           let failCount = 0;
@@ -466,16 +530,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             failed: 0
           });
 
-          for (let i = 0; i < urls.length; i++) {
-            const url = urls[i];
+          for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            const c = item?.content;
+            const url = itemToUrl(item) || "";
             let file = "";
             let lastName = "";
             try {
-              const tab = await openHiddenTab(url);
-              await sleep(800);
-
-              const extracted = await extractFromTab(tab.id);
-              await safeRemoveTab(tab.id);
+              let extracted = null;
+              if (c?.type === "answer" && c.id) {
+                extracted = await zhihuAnswerToMarkdown(c.id);
+              } else if (c?.type === "article" && c.id) {
+                extracted = await zhihuArticleToMarkdown(c.id);
+              } else {
+                extracted = null;
+              }
 
               if (extracted?.ok && extracted.md && extracted.fileBaseName) {
                 lastName = extracted.fileBaseName;
@@ -525,7 +594,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             const elapsedSec = (endTs - startTs) / 1000;
             const delaySec = (Number(delay) || 0) / 1000 * urls.length;
             const coreElapsedSec = Math.max(0, elapsedSec - delaySec);
-            const coreAvgSecPerItem = urls.length ? coreElapsedSec / urls.length : 3;
+            const coreAvgSecPerItem = items.length ? coreElapsedSec / items.length : 3;
             await chrome.storage.local.set({
               zhihuExporterStats: {
                 coreAvgSecPerItem,
@@ -583,8 +652,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             const folder = buildFolderName(`zhihu_${urlToken}/${title}_${cid}`);
 
             const items = await listCollectionItems(cid, limit);
-            const urls = items.map(itemToUrl).filter(Boolean);
-            total += urls.length;
+            total += items.length;
 
             // 每次发现新增总量，顺便更新一下通知（不频繁）
             if (notifyGuard.isEnabled()) {
@@ -601,13 +669,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               currentCollectionTitle: title
             });
 
-            for (const url of urls) {
+            for (const item of items) {
+              const c = item?.content;
+              const url = itemToUrl(item) || "";
               try {
-                const tab = await openHiddenTab(url);
-                await sleep(800);
-
-                const extracted = await extractFromTab(tab.id);
-                await safeRemoveTab(tab.id);
+                let extracted = null;
+                if (c?.type === "answer" && c.id) {
+                  extracted = await zhihuAnswerToMarkdown(c.id);
+                } else if (c?.type === "article" && c.id) {
+                  extracted = await zhihuArticleToMarkdown(c.id);
+                } else {
+                  extracted = null;
+                }
 
                 if (extracted?.ok && extracted.md && extracted.fileBaseName) {
                   const file = `${folder}/${safeFilename(extracted.fileBaseName)}.md`;
@@ -630,6 +703,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                     lastFile: file
                   });
 
+                  if (shouldNotify(processed) && notifyGuard.isEnabled()) {
+                    notifyProgress(scopeTitle, processed, total, okCount, failCount);
+                  }
+                } else {
+                  failCount++;
+                  processed++;
+                  pushUiProgress({
+                    scopeTitle,
+                    stage: "progress",
+                    processed,
+                    total,
+                    ok: okCount,
+                    failed: failCount,
+                    currentCollectionId: cid,
+                    currentCollectionTitle: title,
+                    lastUrl: url
+                  });
                   if (shouldNotify(processed) && notifyGuard.isEnabled()) {
                     notifyProgress(scopeTitle, processed, total, okCount, failCount);
                   }

@@ -31,6 +31,9 @@
 
 - **导出单个收藏夹**：在 `https://www.zhihu.com/collection/<id>` 页面一键导出
 - **导出某个用户的全部收藏夹**：在 `https://www.zhihu.com/people/<token>/collections` 页面一键导出
+- **不再打开新标签页**：
+  - 后台直接调用知乎 API 拉取 `content`（HTML）
+  - 使用 MV3 `offscreen document` 在后台将 HTML 转为 Markdown（全程不创建/关闭 tab）
 - **Markdown 结构清晰**：
   - 每篇内容单独生成一个 `.md`
   - 自动附带 YAML Front Matter（`title / author / source / exported_at`）
@@ -69,7 +72,8 @@
 ## 项目结构
 
 - `manifest.json`：扩展清单（MV3）
-- `background.js`：后台 Service Worker，负责调用知乎 API、打开隐藏标签页、触发导出与下载
+- `background.js`：后台 Service Worker，负责调用知乎 API、触发导出与下载（不再打开隐藏标签页）
+- `offscreen.html / offscreen.js`：MV3 Offscreen Document，用于在后台进行 DOM 解析与 HTML→Markdown 转换
 - `content_context.js`：识别当前页面上下文（用户收藏列表页 / 收藏夹页）
 - `content_extract.js`：在页面内提取正文并转换为 Markdown
 - `turndown-lite.js`：HTML → Markdown 的核心转换逻辑（含代码块等规则）
