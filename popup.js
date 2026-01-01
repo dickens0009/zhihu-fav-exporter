@@ -191,11 +191,18 @@ $("exportAllCollections").addEventListener("click", exportAllCollections);
 
   let totalItems = null;
 
+  const limitRowEl = $("limitRow");
+  const btnsEl = $("btns");
+
   // 默认：先隐藏收藏夹专属 UI
   const infoEl = $("collectionInfo");
   const allRowEl = $("downloadAllRow");
   if (infoEl) infoEl.style.display = "none";
   if (allRowEl) allRowEl.style.display = "none";
+
+  // 默认：输入框与按钮都显示（根据页面类型再裁剪）
+  if (limitRowEl) limitRowEl.style.display = "";
+  if (btnsEl) btnsEl.style.display = "";
 
   // 默认：两个导出按钮都显示（根据页面类型再裁剪）
   const btnExportThis = $("exportThisCollection");
@@ -247,8 +254,11 @@ $("exportAllCollections").addEventListener("click", exportAllCollections);
   }
 
   if (ctx.pageType === "member_collections") {
-    setHint("已识别：当前为“用户收藏夹列表”页面。");
-    $("limitLabel").textContent = "每个列表最多条目";
+    setHint("已识别：当前为用户收藏夹列表页面");
+    // 用户要求：在该页面不展示输入框/按钮，只提示进入任一收藏夹再试
+    if (limitRowEl) limitRowEl.style.display = "none";
+    if (btnsEl) btnsEl.style.display = "none";
+    setStatus("请点击进入任一收藏夹后再试");
     return;
   }
 })();
