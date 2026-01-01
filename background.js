@@ -928,6 +928,25 @@ function buildFolderName(prefix) {
   return safePath(prefix);
 }
 
+function parseSingleExportTarget(urlStr) {
+  try {
+    const u = new URL(String(urlStr || ""));
+    const path = u.pathname || "";
+
+    // 回答：/question/<qid>/answer/<aid>
+    const m1 = path.match(/^\/question\/(\d+)\/answer\/(\d+)/);
+    if (m1) return { kind: "answer", answerId: m1[2], questionId: m1[1] };
+
+    // 文章：/p/<id>（www.zhihu.com 或 zhuanlan.zhihu.com）
+    const m2 = path.match(/^\/p\/(\d+)/);
+    if (m2) return { kind: "article", articleId: m2[1] };
+
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
@@ -944,6 +963,39 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         const total = await getCollectionTotal(collectionId);
         sendResponse({ ok: true, total });
+        return;
+      }
+
+      if (msg?.type === "EXPORT_CURRENT_PAGE") {
+        const { originTabId } = msg || {};
+        if (!originTabId) {
+          sendResponse({ ok: false, error: "missing originTabId" });
+          return;
+        }
+
+        const tab = await chrome.tabs.get(originTabId).catch(() => null);
+        const url = tab?.url || "";
+        const target = parseSingleExportTarget(url);
+        if (!target) {
+          sendResponse({ ok: false, error: "当前页面不是回答或文章页面" });
+          return;
+        }
+
+        let extracted = null;
+        if (target.kind === "answer" && target.answerId) {
+          extracted = await zhihuAnswerToMarkdown(target.answerId);
+        } else if (target.kind === "article" && target.articleId) {
+          extracted = await zhihuArticleToMarkdown(target.articleId);
+        }
+
+        if (!extracted?.ok || !extracted.md || !extracted.fileBaseName) {
+          sendResponse({ ok: false, error: "导出失败：未能生成 Markdown" });
+          return;
+        }
+
+        const file = `${safeFilename(extracted.fileBaseName)}.md`;
+        await downloadMarkdownFile(file, extracted.md);
+        sendResponse({ ok: true, filename: file });
         return;
       }
 

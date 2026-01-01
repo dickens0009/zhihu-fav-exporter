@@ -6,6 +6,7 @@ const FIXED_DELAY_MS = 1000;
 // 收藏夹页：缓存标题与总数，避免依赖 DOM 元素（也便于重绘提示文案）
 let cachedCollectionTitle = "";
 let cachedCollectionTotal = null;
+let primaryAction = "collection"; // collection | page_md
 
 async function getActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -150,6 +151,28 @@ async function exportThisCollection() {
   setStatus(`完成 ✅\n文件：${resp.filename}\n成功条目：${resp.count}`);
 }
 
+async function exportCurrentPageMd() {
+  const tab = await getActiveTab();
+  if (!tab?.id) return setStatus("未找到当前标签页");
+
+  const ctxResp = await getContext(tab.id);
+  const ctx = ctxResp?.ctx;
+
+  if (!ctx || (ctx.pageType !== "answer" && ctx.pageType !== "article")) {
+    return setStatus("请打开某个回答或文章页面后再试");
+  }
+
+  const kindText = ctx.pageType === "answer" ? "回答" : "文章";
+  setStatus(`开始导出当前${kindText}…`);
+  const resp = await chrome.runtime.sendMessage({
+    type: "EXPORT_CURRENT_PAGE",
+    originTabId: tab.id
+  });
+
+  if (!resp?.ok) return setStatus("导出失败：" + (resp?.error || "未知错误"));
+  setStatus(`完成 ✅\n文件：${resp.filename}`);
+}
+
 async function exportAllCollections() {
   const tab = await getActiveTab();
   if (!tab?.id) return setStatus("未找到当前标签页");
@@ -175,7 +198,11 @@ async function exportAllCollections() {
   setStatus(`完成 ✅\n文件：${resp.filename}\n成功条目：${resp.count}`);
 }
 
-$("exportThisCollection").addEventListener("click", exportThisCollection);
+// 主按钮：根据识别到的页面类型切换行为
+$("exportThisCollection").addEventListener("click", () => {
+  if (primaryAction === "page_md") return exportCurrentPageMd();
+  return exportThisCollection();
+});
 $("exportAllCollections").addEventListener("click", exportAllCollections);
 
 // 弹窗打开即检测当前页面，并在“收藏夹页”展示总数 + 预计耗时
@@ -211,11 +238,16 @@ $("exportAllCollections").addEventListener("click", exportAllCollections);
   if (btnExportAll) btnExportAll.style.display = "";
 
   if (!ctx || ctx.pageType === "other") {
-    setHint("请打开知乎收藏夹页（https://www.zhihu.com/collection/<id>）或用户收藏夹列表页后再使用。");
+    // 非目标页面：不展示输入/按钮，只给出提示
+    if (limitRowEl) limitRowEl.style.display = "none";
+    if (btnsEl) btnsEl.style.display = "none";
+    setHint("");
+    setStatus("请打开知乎收藏夹页面或收藏夹列表后再试。");
     return;
   }
 
   if (ctx.pageType === "collection" && ctx.collectionId) {
+    primaryAction = "collection";
     cachedCollectionTitle = String(ctx.collectionTitle || "").trim();
     if (!cachedCollectionTitle) cachedCollectionTitle = `#${ctx.collectionId}`;
 
@@ -253,7 +285,38 @@ $("exportAllCollections").addEventListener("click", exportAllCollections);
     return;
   }
 
+  if (ctx.pageType === "answer") {
+    primaryAction = "page_md";
+    const title = String(ctx.answerTitle || "").trim();
+    setHint(title ? `已识别：当前为回答页面\n${title}` : "已识别：当前为回答页面");
+    if (limitRowEl) limitRowEl.style.display = "none";
+    if (btnsEl) btnsEl.style.display = "";
+    if (btnExportAll) btnExportAll.style.display = "none";
+    if (btnExportThis) btnExportThis.style.display = "";
+    if (btnExportThis) btnExportThis.textContent = "导出当前回答";
+    if (allRowEl) allRowEl.style.display = "none";
+    if (infoEl) infoEl.style.display = "none";
+    setStatus("");
+    return;
+  }
+
+  if (ctx.pageType === "article") {
+    primaryAction = "page_md";
+    const title = String(ctx.articleTitle || "").trim();
+    setHint(title ? `已识别：当前为文章页面\n${title}` : "已识别：当前为文章页面");
+    if (limitRowEl) limitRowEl.style.display = "none";
+    if (btnsEl) btnsEl.style.display = "";
+    if (btnExportAll) btnExportAll.style.display = "none";
+    if (btnExportThis) btnExportThis.style.display = "";
+    if (btnExportThis) btnExportThis.textContent = "导出当前文章";
+    if (allRowEl) allRowEl.style.display = "none";
+    if (infoEl) infoEl.style.display = "none";
+    setStatus("");
+    return;
+  }
+
   if (ctx.pageType === "member_collections") {
+    primaryAction = "collection";
     setHint("已识别：当前为用户收藏夹列表页面");
     // 用户要求：在该页面不展示输入框/按钮，只提示进入任一收藏夹再试
     if (limitRowEl) limitRowEl.style.display = "none";

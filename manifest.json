@@ -21,7 +21,7 @@
     "background": { "service_worker": "background.js", "type": "module" },
     "content_scripts": [
       {
-        "matches": ["https://www.zhihu.com/*"],
+        "matches": ["https://www.zhihu.com/*", "https://zhuanlan.zhihu.com/*"],
         "js": ["content_context.js"],
         "run_at": "document_idle"
       },
