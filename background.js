@@ -133,23 +133,8 @@ function pushUiProgress(payload) {
   }
 }
 
-// 节流：避免过于频繁更新通知
-function makeProgressThrottler({ everyN = 10, minIntervalMs = 3000 }) {
-  let lastTs = 0;
-  return (done) => {
-    const now = Date.now();
-    if (done % everyN === 0 && now - lastTs >= minIntervalMs) {
-      lastTs = now;
-      return true;
-    }
-    if (now - lastTs >= minIntervalMs * 2) {
-      lastTs = now;
-      return true;
-    }
-    return false;
-  };
-}
-
+// 注意：历史上这里曾对通知做节流，避免 Windows 通知过于频繁。
+// 目前按用户要求，进度通知改为“每条下载都更新”，因此不再需要节流函数。
 
 function safeFilename(name, { maxLen = 120 } = {}) {
   let s = String(name || "");
@@ -1017,8 +1002,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const folder = buildFolderName(folderBase);
           // UI/通知里显示收藏夹名称，和 popup 顶部保持一致；无名称再回退到 id
           const scopeTitle = title ? `收藏夹“${title}”` : `收藏夹 #${collectionId}`;
-          // Windows 通知过于频繁会打扰用户：这里对“进度通知”做节流（start/done 仍会通知）
-          const shouldNotify = makeProgressThrottler({ everyN: 10, minIntervalMs: 5000 });
+          // 按用户要求：每处理 1 个条目就更新一次系统通知（不节流）
+          const shouldNotify = () => true;
 
           if (notifyGuard.isEnabled()) notifyStart(scopeTitle, total);
           pushUiProgress({
@@ -1137,8 +1122,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           let total = 0;
 
           const scopeTitle = `用户 ${urlToken} 全部收藏夹`;
-          // Windows 通知过于频繁会打扰用户：对“进度通知”做节流（start/done 仍会通知）
-          const shouldNotify = makeProgressThrottler({ everyN: 10, minIntervalMs: 5000 });
+          // 按用户要求：每处理 1 个条目就更新一次系统通知（不节流）
+          const shouldNotify = () => true;
 
           if (notifyGuard.isEnabled()) notifyStart(scopeTitle, 0); // total 先未知，后面动态更新
           pushUiProgress({
