@@ -301,6 +301,25 @@ function pickZhihuQuestionEntity(initialState, qid) {
   return null;
 }
 
+function pickZhihuUserEntity(initialState, userId) {
+  const id = String(userId || "");
+  const entities = initialState?.entities || initialState?.initialState?.entities;
+  const users = entities?.users;
+  if (users && Object.prototype.hasOwnProperty.call(users, id)) return users[id];
+  return null;
+}
+
+function pickZhihuArticleEntity(initialState, articleId) {
+  const id = String(articleId || "");
+  const entities = initialState?.entities || initialState?.initialState?.entities;
+  // 知乎/专栏常见：entities.articles；少数页面可能叫 posts
+  const articles = entities?.articles;
+  if (articles && Object.prototype.hasOwnProperty.call(articles, id)) return articles[id];
+  const posts = entities?.posts;
+  if (posts && Object.prototype.hasOwnProperty.call(posts, id)) return posts[id];
+  return null;
+}
+
 async function zhihuAnswerToMarkdownViaPage(answerId) {
   // 不需要 questionId：/answer/{id} 通常会 302 到 canonical URL
   const pageUrl = `https://www.zhihu.com/answer/${answerId}`;
@@ -330,6 +349,56 @@ async function zhihuAnswerToMarkdownViaPage(answerId) {
   const updated = formatLocalDateTime(ans?.updatedTime || ans?.updated_time);
   const created = formatLocalDateTime(ans?.createdTime || ans?.created_time);
   const contentTimeText = updated ? `编辑于 ${updated}` : created ? `发布于 ${created}` : "";
+
+  const fileBaseName = `${title}${author ? " - " + author : ""}`;
+  const md =
+    buildFrontMatter({ title, author, url }) +
+    "\n" +
+    (bodyMd ? bodyMd + "\n" : "") +
+    (contentTimeText ? "\n" + contentTimeText + "\n" : "");
+
+  return { ok: true, md, title, url, fileBaseName, contentTimeText };
+}
+
+async function zhihuArticleToMarkdownViaPage(articleId) {
+  const pageUrl = `https://zhuanlan.zhihu.com/p/${articleId}`;
+  const htmlPage = await zhihuPageGetHtml(pageUrl);
+  const initialState = pickZhihuInitialStateFromHtml(htmlPage);
+  if (!initialState) {
+    throw new Error(`无法从文章页面解析 initialState（可能是知乎结构变更或被风控）：${pageUrl}`);
+  }
+
+  const art = pickZhihuArticleEntity(initialState, articleId);
+  if (!art) {
+    throw new Error(`文章页面中找不到 articles/posts[${articleId}]（可能无权限/已删除）：${pageUrl}`);
+  }
+
+  const title = String(art?.title || "").trim() || "Untitled";
+
+  // author 可能是对象，也可能是 userId（字符串/数字）
+  let author = "";
+  if (typeof art?.author === "string" || typeof art?.author === "number") {
+    const u = pickZhihuUserEntity(initialState, art.author);
+    author = String(u?.name || u?.nickname || "").trim();
+  } else {
+    author = String(art?.author?.name || art?.author?.nickname || "").trim();
+  }
+
+  const html = String(art?.content || "");
+  const url = pageUrl;
+
+  const bodyMd = html ? await convertHtmlToMarkdownOffscreen(html, url) : "";
+
+  const updated = formatLocalDateTime(art?.updatedTime ?? art?.updated_time ?? art?.updated);
+  const created = formatLocalDateTime(art?.createdTime ?? art?.created_time ?? art?.created);
+  const apiTimeText = updated ? `编辑于 ${updated}` : created ? `发布于 ${created}` : "";
+
+  // 和 API 路径一致：尽量拿到 “时间 + 地点”
+  let pageTimeText = "";
+  try {
+    pageTimeText = await fetchContentItemTimeFromPage(url);
+  } catch (_) {}
+  const contentTimeText = pageTimeText || apiTimeText;
 
   const fileBaseName = `${title}${author ? " - " + author : ""}`;
   const md =
@@ -671,7 +740,17 @@ async function zhihuArticleToMarkdown(articleId) {
   const api = `https://www.zhihu.com/api/v4/articles/${articleId}?include=${encodeURIComponent(
     include
   )}`;
-  const data = await zhihuApiGet(api);
+  let data = null;
+  try {
+    data = await zhihuApiGet(api);
+  } catch (e) {
+    // 403 常见原因：接口风控/请求参数校验升级（如 code=10003 “请升级客户端”）。
+    // 为了不让“单条文章 403 直接失败”，这里自动降级：抓取文章页面并从 initialState 解析内容。
+    if (Number(e?.status) === 403) {
+      return await zhihuArticleToMarkdownViaPage(articleId);
+    }
+    throw e;
+  }
 
   const title = String(data?.title || "").trim() || "Untitled";
   const author = String(data?.author?.name || "").trim();

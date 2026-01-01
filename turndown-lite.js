@@ -227,6 +227,13 @@ function htmlToMarkdown(rootEl, opts = {}) {
       return wrapFencedCodeBlock(txt, lang);
     }
 
+    // 表格：Obsidian 支持 Markdown 内嵌 HTML。这里原样保留 HTML，避免“表格转 md”带来的对齐/合并单元格等问题。
+    // 注意：返回时前后补空行，避免与相邻文本粘连导致渲染异常。
+    if (tag === "table") {
+      const html = node.outerHTML || "";
+      return html ? `\n\n${html}\n\n` : "";
+    }
+
     // 行内 code
     if (tag === "code") {
       const txt = node.textContent || "";
@@ -269,6 +276,11 @@ function htmlToMarkdown(rootEl, opts = {}) {
       if (!trimmed) return "";
       // 若段落里包含块公式（$$...$$），不要把换行压扁
       if (/^\$\$\s*[\s\S]*\s*\$\$$/.test(trimmed) || trimmed.includes("\n$$\n") || trimmed.startsWith("$$\n")) {
+        return `${trimmed}\n\n`;
+      }
+
+      // 兜底：如果段落中包含表格 HTML，不要把换行全部去掉（否则可能把 <table> 挤成一行影响渲染）
+      if (/<table[\s>]/i.test(trimmed) || /<\/table>/i.test(trimmed)) {
         return `${trimmed}\n\n`;
       }
 
