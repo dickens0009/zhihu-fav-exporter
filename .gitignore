@@ -41,3 +41,6 @@ out/
 *.db
 data/
 uploads/
+
+# 忽略 info 目录及其所有内容
+info/

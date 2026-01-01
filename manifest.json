@@ -1,8 +1,9 @@
 {
     "manifest_version": 3,
-    "name": "Zhihu Collections → Markdown Exporter",
-    "version": "0.2.0",
-    "description": "Export Zhihu collections to Markdown. Images kept as links only.",
+    "name": "知乎收藏夹导出助手",
+    "version": "1.0.1",
+    "description": "将知乎收藏夹内容批量导出为 Markdown 文件，图片保持在线链接。",
+    "default_locale": "zh_CN",
     "icons": {
       "16": "icon128.png",
       "48": "icon128.png",

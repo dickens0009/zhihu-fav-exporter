@@ -1,0 +1,9 @@
+{
+    "ext_name": {
+      "message": "知乎收藏夹导出助手"
+    },
+    "ext_desc": {
+      "message": "将知乎收藏夹内容批量导出为 Markdown 文件，图片保持在线链接。"
+    }
+  }
+  
