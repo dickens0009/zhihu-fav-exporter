@@ -539,6 +539,11 @@ function pickFirstString(...vals) {
   return "";
 }
 
+function normalizeInlineText(s) {
+  // 把多余空白压缩成单个空格，避免出现换行/多个空格
+  return String(s || "").replace(/\s+/g, " ").trim();
+}
+
 function formatTimeLocationLine(prefix, timeText, locationText) {
   if (!timeText && !locationText) return "";
   if (timeText && locationText) return `${prefix} ${timeText}・${locationText}`;
@@ -572,6 +577,29 @@ async function fetchZvideoMetaFromPage(baseUrl) {
   // 兜底：结构变更时仍尽力匹配
   const meta2 = await extractTextFromHtmlOffscreen(html, '[class*="ZVideo-meta"]');
   return meta2 || "";
+}
+
+async function fetchContentItemTimeFromPage(pageUrl) {
+  // 从文章/回答页面 HTML 中提取“发布于/编辑于 + 时间 + 地点”所在的 .ContentItem-time
+  const html = await zhihuPageGetHtml(pageUrl);
+
+  const selectors = [
+    "article .ContentItem-time",
+    ".Post-Main .ContentItem-time",
+    ".AnswerItem .ContentItem-time",
+    ".ContentItem .ContentItem-time",
+    ".ContentItem-time"
+  ];
+
+  for (const sel of selectors) {
+    try {
+      const t = normalizeInlineText(await extractTextFromHtmlOffscreen(html, sel));
+      if (t) return t;
+    } catch (_) {
+      // selector 不存在/解析失败：继续尝试下一个
+    }
+  }
+  return "";
 }
 
 function buildFrontMatter({ title, author, url }) {
@@ -652,9 +680,22 @@ async function zhihuArticleToMarkdown(articleId) {
 
   const bodyMd = await convertHtmlToMarkdownOffscreen(html, url);
 
-  const updated = formatLocalDateTime(data?.updated_time);
-  const created = formatLocalDateTime(data?.created_time);
-  const contentTimeText = updated ? `编辑于 ${updated}` : created ? `发布于 ${created}` : "";
+  // 文章 API 字段在不同版本/环境下可能是 created/updated 或 created_time/updated_time
+  const updated = formatLocalDateTime(
+    data?.updated_time ?? data?.updatedTime ?? data?.updated
+  );
+  const created = formatLocalDateTime(
+    data?.created_time ?? data?.createdTime ?? data?.created
+  );
+  const apiTimeText = updated ? `编辑于 ${updated}` : created ? `发布于 ${created}` : "";
+
+  // 关键：从页面 .ContentItem-time 兜底拿“时间 + 地点”（例：发布于 2025-12-30 23:34・广东）
+  let pageTimeText = "";
+  try {
+    pageTimeText = await fetchContentItemTimeFromPage(url);
+  } catch (_) {}
+
+  const contentTimeText = pageTimeText || apiTimeText;
 
   const fileBaseName = `${title}${author ? " - " + author : ""}`;
   const md =
